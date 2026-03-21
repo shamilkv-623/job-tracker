@@ -5,10 +5,10 @@ import json
 
 # 1. OpenRouter Configuration
 # Get your key from https://openrouter.ai/keys
-OPENROUTER_API_KEY = "your-openrouter-key-here"
+OPENROUTER_API_KEY = "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"
 # Example free model: "meta-llama/llama-3-8b-instruct:free" 
 # Or low-cost: "openai/gpt-4o-mini"
-MODEL_NAME = "openai/gpt-4o-mini" 
+MODEL_NAME = "meta-llama/llama-3.3-70b-instruct:free"
 
 def generic_scraper(url, keywords):
     """
