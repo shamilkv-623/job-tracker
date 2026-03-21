@@ -10,36 +10,33 @@ OPENROUTER_API_KEY = "sk-or-v1-13142f3905f77d5a8d552cd049df4401e1e46edc84926f151
 # Or low-cost: "openai/gpt-4o-mini"
 MODEL_NAME = "meta-llama/llama-3.3-70b-instruct:free"
 
-def generic_scraper(url, keywords):
+
+def ai_agent_scraper(url, keywords):
     """
-    Uses Jina Reader to clean the page and OpenRouter LLMs to extract jobs.
+    LAYER 2: Uses Jina Reader + Llama 3.3 to find jobs normal scraping missed.
     """
-    # --- STEP 1: Jina Reader (Convert URL to Markdown) ---
+    # 1. Jina Reader (Convert URL to clean Markdown)
     reader_url = f"https://r.jina.ai/{url}"
     try:
         response = requests.get(reader_url, timeout=15)
-        # We cap the content to avoid hitting model token limits
-        content = response.text[:12000] 
+        content = response.text[:12000] # Stay within token limits
     except Exception as e:
-        print(f"Jina Reader Error: {e}")
+        print(f"Jina Error: {e}")
         return pd.DataFrame()
 
-    # --- STEP 2: OpenRouter API Call ---
-    # OpenRouter uses the OpenAI-compatible SDK
+    # 2. OpenRouter API Setup
     client = openai.OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=OPENROUTER_API_KEY,
     )
     
+    # We use a very strict prompt for the Free model
     prompt = f"""
-    Act as a job recruiter. I am interested in these topics: {keywords}.
-    From the provided text, find all job openings that match these interests.
-    
+    Find all job openings matching these interests: {keywords}.
     Return ONLY a JSON object with a key 'jobs' containing a list of objects.
-    Each object must have: 'title', 'location', and 'link'.
-    If no jobs match, return {{"jobs": []}}.
+    Each object must have: 'Title', 'Location', and 'Link'.
     
-    TEXT TO ANALYZE:
+    TEXT:
     {content}
     """
 
@@ -47,19 +44,23 @@ def generic_scraper(url, keywords):
         chat = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],
-            # Note: Not all free models support 'json_object' response_format, 
-            # so we handle it via the prompt instructions primarily.
+            # Note: response_format is used, but we handle the string just in case
             response_format={ "type": "json_object" } 
         )
         
-        # Parse result
-        raw_content = chat.choices[0].message.content
-        data = json.loads(raw_content)
+        # 3. Robust JSON Parsing
+        raw_content = chat.choices[0].message.content.strip()
         
-        # Ensure we return a DataFrame even if empty
+        # Remove potential markdown backticks if the model adds them
+        if raw_content.startswith("```"):
+            raw_content = raw_content.split("json")[-1].split("```")[0].strip()
+            
+        data = json.loads(raw_content)
         jobs = data.get("jobs", [])
+        
         return pd.DataFrame(jobs)
 
     except Exception as e:
-        st.error(f"OpenRouter Error: {e}")
+        # Silently fail so the app continues to the next URL
+        print(f"LLM Error on {url}: {e}")
         return pd.DataFrame()
