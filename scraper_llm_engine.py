@@ -1,37 +1,65 @@
 import openai
 import requests
+import pandas as pd
+import json
+
+# 1. OpenRouter Configuration
+# Get your key from https://openrouter.ai/keys
+OPENROUTER_API_KEY = "your-openrouter-key-here"
+# Example free model: "meta-llama/llama-3-8b-instruct:free" 
+# Or low-cost: "openai/gpt-4o-mini"
+MODEL_NAME = "openai/gpt-4o-mini" 
 
 def generic_scraper(url, keywords):
     """
-    Hybrid Scraper: Tries simple scraping first, 
-    falls back to LLM if the site structure is complex or changed.
+    Uses Jina Reader to clean the page and OpenRouter LLMs to extract jobs.
     """
-    # 1. Try to get clean text from the URL
-    # We use a 'Reader' API to strip away HTML junk for the LLM
+    # --- STEP 1: Jina Reader (Convert URL to Markdown) ---
     reader_url = f"https://r.jina.ai/{url}"
     try:
-        response = requests.get(reader_url, timeout=10)
-        markdown_content = response.text[:15000] # Cap content to save API tokens
+        response = requests.get(reader_url, timeout=15)
+        # We cap the content to avoid hitting model token limits
+        content = response.text[:12000] 
     except Exception as e:
-        return pd.DataFrame({"Error": [f"Could not reach site: {e}"]})
+        print(f"Jina Reader Error: {e}")
+        return pd.DataFrame()
 
-    # 2. Call the LLM to find the jobs
-    client = openai.OpenAI(api_key="YOUR_OPENAI_API_KEY")
-    
-    prompt = f"Extract all job postings matching these keywords: {keywords}. " \
-             f"Return ONLY a JSON list of objects with keys: 'title', 'location', 'link'. " \
-             f"Page Content: {markdown_content}"
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini", # Fast and cheap for this task
-        messages=[{"role": "user", "content": prompt}],
-        response_format={ "type": "json_object" }
+    # --- STEP 2: OpenRouter API Call ---
+    # OpenRouter uses the OpenAI-compatible SDK
+    client = openai.OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
     )
-
-    # 3. Parse JSON and return DataFrame
-    import json
-    raw_data = json.loads(response.choices[0].message.content)
-    # Most LLMs return a dict, we want the list inside it
-    jobs_list = raw_data.get("jobs", raw_data.get("postings", []))
     
-    return pd.DataFrame(jobs_list)
+    prompt = f"""
+    Act as a job recruiter. I am interested in these topics: {keywords}.
+    From the provided text, find all job openings that match these interests.
+    
+    Return ONLY a JSON object with a key 'jobs' containing a list of objects.
+    Each object must have: 'title', 'location', and 'link'.
+    If no jobs match, return {{"jobs": []}}.
+    
+    TEXT TO ANALYZE:
+    {content}
+    """
+
+    try:
+        chat = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}],
+            # Note: Not all free models support 'json_object' response_format, 
+            # so we handle it via the prompt instructions primarily.
+            response_format={ "type": "json_object" } 
+        )
+        
+        # Parse result
+        raw_content = chat.choices[0].message.content
+        data = json.loads(raw_content)
+        
+        # Ensure we return a DataFrame even if empty
+        jobs = data.get("jobs", [])
+        return pd.DataFrame(jobs)
+
+    except Exception as e:
+        st.error(f"OpenRouter Error: {e}")
+        return pd.DataFrame()
