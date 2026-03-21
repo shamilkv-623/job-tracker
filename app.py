@@ -4,17 +4,19 @@ import sqlite3
 import bcrypt
 import time
 from io import BytesIO
-from scraper_engine import generic_scraper
+# FIX: Explicit import to avoid NameError in the download button
+from datetime import datetime 
+
+# Import the new coordinator from your engine
+from scraper_engine import smart_scraper 
 from utils import extract_text_from_pdf, extract_keywords_from_cv
 
 # --- 1. DATABASE SETUP & HELPERS ---
 def init_db():
     conn = sqlite3.connect('job_tracker.db')
     c = conn.cursor()
-    # Users table
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (username TEXT PRIMARY KEY, password TEXT, keywords TEXT)''')
-    # URLs table
     c.execute('''CREATE TABLE IF NOT EXISTS urls 
                  (username TEXT, url TEXT, UNIQUE(username, url))''')
     conn.commit()
@@ -45,9 +47,11 @@ def get_user_keywords(username):
     conn = sqlite3.connect('job_tracker.db')
     c = conn.cursor()
     c.execute("SELECT keywords FROM users WHERE username = ?", (username,))
-    res = c.fetchone()[0]
+    res = c.fetchone()
     conn.close()
-    return [k.strip() for k in res.split(",") if k.strip()] if res else []
+    if res and res[0]:
+        return [k.strip() for k in res[0].split(",") if k.strip()]
+    return []
 
 def save_user_keywords(username, kw_list):
     conn = sqlite3.connect('job_tracker.db')
@@ -122,7 +126,6 @@ if st.button("💾 Save Profile Settings"):
             text = extract_text_from_pdf(uploaded_file)
             updated_kw.extend(extract_keywords_from_cv(text))
     
-    # Remove duplicates
     final_kw_list = list(set(updated_kw))
     save_user_keywords(username, final_kw_list)
     st.success("Profile Updated!")
@@ -132,7 +135,7 @@ st.divider()
 
 # --- UI: STEP 2 (URLS) ---
 st.subheader("🌐 Step 2: Your Tracked Companies")
-new_url = st.text_input("Add Career Portal URL (e.g., https://jobs.deloitte.com)")
+new_url = st.text_input("Add Career Portal URL")
 if st.button("➕ Add to My List"):
     if new_url:
         conn = sqlite3.connect('job_tracker.db')
@@ -141,10 +144,9 @@ if st.button("➕ Add to My List"):
             c.execute("INSERT INTO urls (username, url) VALUES (?, ?)", (username, new_url))
             conn.commit()
             st.rerun()
-        except: st.warning("Site is already in your list.")
+        except: st.warning("Site already in your list.")
         finally: conn.close()
 
-# Display URL List
 user_urls = get_user_urls(username)
 for i, url in enumerate(user_urls):
     c1, c2 = st.columns([9, 1])
@@ -159,7 +161,7 @@ for i, url in enumerate(user_urls):
 
 st.divider()
 
-# --- UI: STEP 3 (EXECUTION) ---
+# --- UI: STEP 3 (MODIFIED EXECUTION) ---
 st.subheader("🔍 Step 3: Run AI Refresh")
 if st.button("🔥 START MULTI-SITE SCAN", type="primary", use_container_width=True):
     keywords = get_user_keywords(username)
@@ -172,28 +174,28 @@ if st.button("🔥 START MULTI-SITE SCAN", type="primary", use_container_width=T
         status_log = st.empty()
         
         for i, url in enumerate(user_urls):
-            status_log.info(f"AI is analyzing: {url}...")
+            status_log.info(f"Scanning: {url}...")
             
-            # --- LLM SCRAPER CALL ---
-            df = generic_scraper(url, keywords)
+            # --- MODIFIED: CALLING THE 2-LAYER SMART SCRAPER ---
+            # This calls Layer 1 (BeautifulSoup) first, then Layer 2 (LLM) if needed.
+            df = smart_scraper(url, keywords)
             
             if not df.empty:
-                df["Company URL"] = url
+                df["Source"] = url
                 all_results.append(df)
             
-            # --- RATE LIMIT PROTECTION ---
-            # Essential for Free OpenRouter models (Llama 3.3 70B)
-            time.sleep(3) 
+            # Keep a small buffer to avoid hitting rate limits on the AI fallback
+            time.sleep(2) 
             progress.progress((i+1)/len(user_urls))
         
         status_log.empty()
         
         if all_results:
-            final_df = pd.concat(all_results).drop_duplicates()
+            final_df = pd.concat(all_results, ignore_index=True).drop_duplicates()
             st.success(f"Scan complete! Found {len(final_df)} potential matches.")
             st.dataframe(final_df, use_container_width=True)
             
-            # Excel Download Buffer
+            # Excel Download
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 final_df.to_excel(writer, index=False)
@@ -205,4 +207,4 @@ if st.button("🔥 START MULTI-SITE SCAN", type="primary", use_container_width=T
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.warning("No new matching jobs found on these sites.")
+            st.warning("No new matching jobs found.")
