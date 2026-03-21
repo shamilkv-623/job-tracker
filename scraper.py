@@ -1,38 +1,39 @@
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
-from urllib.parse import urljoin
 
-def scrape_jobs(url, keyword):
+def is_relevant(text, keywords):
+    if not text:
+        return False
+    text = text.lower()
+    return any(k in text for k in keywords)
+
+def generic_scraper(url, keywords, company="Custom"):
+    headers = {"User-Agent": "Mozilla/5.0"}
+
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
-
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
 
         jobs = []
 
-        for link in soup.find_all("a"):
+        for link in soup.find_all("a", href=True):
             text = link.get_text(strip=True)
-            href = link.get("href")
 
-            if text and href:
-                full_link = urljoin(url, href)
+            if is_relevant(text, keywords) and len(text) > 10:
+                href = link["href"]
 
-                if keyword.lower() in text.lower():
-                    jobs.append({
-                        "Job Title": text,
-                        "Application Link": full_link
-                    })
+                if href.startswith("/"):
+                    href = url.rstrip("/") + href
 
-        df = pd.DataFrame(jobs)
+                jobs.append({
+                    "Company": company,
+                    "Title": text,
+                    "Location": "Check site",
+                    "Link": href
+                })
 
-        if df.empty:
-            return pd.DataFrame({"Message": ["No matching jobs found"]})
-
-        return df.drop_duplicates()
+        return pd.DataFrame(jobs)
 
     except Exception as e:
         return pd.DataFrame({"Error": [str(e)]})
