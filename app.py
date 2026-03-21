@@ -3,121 +3,122 @@ import pandas as pd
 from scraper_engine import generic_scraper
 from utils import extract_text_from_pdf, extract_keywords_from_cv
 
-# --- PAGE SETUP ---
-st.set_page_config(page_title="AI Job Tracker", layout="wide")
+# --- 1. INITIAL CONFIG ---
+st.set_page_config(page_title="AI Job Tracker", layout="wide", page_icon="🚀")
 
 st.title("🚀 AI-Powered Job Tracker")
-st.markdown("Track jobs from MULTIPLE company websites + match with your CV")
+st.markdown("Set your profile once, paste your target URLs, and run the scan.")
 
-# --- SESSION STATE ---
-if "tracked_sites" not in st.session_state:
-    st.session_state.tracked_sites = []
+# --- 2. THE MASTER KEYWORDS (Step 1) ---
+st.subheader("🎯 Step 1: Define Your Search Profile")
+st.info("These keywords will be used to filter jobs across ALL websites you provide below.")
 
-# --- INPUT SECTION ---
-st.subheader("➕ Add Website to Track")
+col_key1, col_key2 = st.columns([2, 1])
 
-col_inputs, col_upload = st.columns([2, 1])
-
-with col_inputs:
-    new_url = st.text_input("🌐 Enter Careers Page URL", placeholder="https://company.com/careers")
+with col_key1:
     manual_keywords = st.text_input(
         "🔑 Enter Keywords (comma separated)",
-        placeholder="data scientist, quant, risk",
-        help="Type keywords and press Enter before clicking 'Add Site'"
+        placeholder="e.g. data scientist, quant, python, risk",
+        help="Type your keywords and press Enter."
     )
 
-with col_upload:
-    uploaded_file = st.file_uploader("📄 Upload your CV (PDF) to auto-extract", type=["pdf"])
+with col_key2:
+    uploaded_file = st.file_uploader("📄 Or Upload CV (PDF)", type=["pdf"])
 
-# --- CONSOLIDATE KEYWORDS ---
-keywords = []
+# Consolidate Keywords into a single master list
+master_keywords = []
 
-# 1. Process CV Keywords
 if uploaded_file:
-    with st.spinner("Extracting from CV..."):
+    with st.spinner("Analyzing CV..."):
         text = extract_text_from_pdf(uploaded_file)
         cv_keywords = extract_keywords_from_cv(text)
-        keywords.extend(cv_keywords)
-        if cv_keywords:
-            st.info(f"✅ Found {len(cv_keywords)} keywords in CV")
+        master_keywords.extend(cv_keywords)
 
-# 2. Process Manual Keywords
 if manual_keywords:
     manual_list = [k.strip().lower() for k in manual_keywords.split(",") if k.strip()]
-    keywords.extend(manual_list)
+    master_keywords.extend(manual_list)
 
-# 3. Clean and deduplicate
-keywords = list(set(keywords))
+# Clean and remove duplicates
+master_keywords = list(set(master_keywords))
 
-# --- ADD SITE LOGIC ---
-if st.button("➕ Add Site to Tracker", use_container_width=True):
-    if not new_url:
-        st.error("❌ Please enter a Careers Page URL")
-    elif not keywords:
-        # This handles the error you saw in the screenshot
-        st.error("❌ No keywords found. Please type manual keywords (and press Enter) or upload a CV.")
-    else:
-        # Add to state
-        st.session_state.tracked_sites.append({
-            "url": new_url,
-            "keywords": keywords
-        })
-        st.success(f"✅ Added {new_url} to your list!")
-        st.toast("Site added!", icon="🎉")
-        # Rerun to refresh the list and clear inputs
-        st.rerun()
+if master_keywords:
+    st.success(f"**Targeting {len(master_keywords)} Keywords:** {', '.join(master_keywords)}")
+else:
+    st.warning("⚠️ No keywords detected yet. Please type some or upload your CV.")
 
 st.divider()
 
-# --- TRACKED WEBSITES LIST ---
-st.subheader(f"📂 Tracked Websites ({len(st.session_state.tracked_sites)})")
+# --- 3. THE TARGET LIST (Step 2) ---
+st.subheader("🌐 Step 2: List Careers Pages")
+urls_input = st.text_area(
+    "Paste one Careers Page URL per line:",
+    placeholder="https://company-a.com/jobs\nhttps://company-b.com/careers",
+    height=150
+)
 
-if st.session_state.tracked_sites:
-    for i, site in enumerate(st.session_state.tracked_sites):
-        with st.expander(f"📍 {site['url']}", expanded=True):
-            c1, c2 = st.columns([5, 1])
-            with c1:
-                st.write(f"**Keywords:** {', '.join(site['keywords'])}")
-            with c2:
-                if st.button("❌ Remove", key=f"remove_{i}"):
-                    st.session_state.tracked_sites.pop(i)
-                    st.rerun()
+# Parse the text area into a clean list
+url_list = [url.strip() for url in urls_input.split("\n") if url.strip()]
 
-    # --- RUN MONITORING ---
-    st.subheader("🔍 Run Monitoring")
-    if st.button("🚀 Run for All Websites", type="primary", use_container_width=True):
+if url_list:
+    st.caption(f"✅ {len(url_list)} websites ready for scanning.")
+
+st.divider()
+
+# --- 4. EXECUTION (Step 3) ---
+st.subheader("🚀 Step 3: Run Execution")
+
+# Big Action Button
+if st.button("🔥 START MULTI-SITE SCAN", type="primary", use_container_width=True):
+    if not url_list:
+        st.error("❌ Please provide at least one URL in Step 2.")
+    elif not master_keywords:
+        st.error("❌ Please provide keywords or a CV in Step 1.")
+    else:
         all_results = []
-
+        
+        # UI Feedback elements
         progress_bar = st.progress(0)
-        num_sites = len(st.session_state.tracked_sites)
-
-        for i, site in enumerate(st.session_state.tracked_sites):
-            st.write(f"Scanning: {site['url']}...")
-            df = generic_scraper(site["url"], site["keywords"])
-
-            if not df.empty and "Error" not in df.columns:
-                all_results.append(df)
+        status_text = st.empty()
+        
+        for i, url in enumerate(url_list):
+            status_text.info(f"Scanning ({i+1}/{len(url_list)}): {url}...")
             
-            progress_bar.progress((i + 1) / num_sites)
+            # Run the scraper using the master keyword list
+            try:
+                df = generic_scraper(url, master_keywords)
+                
+                if not df.empty and "Error" not in df.columns:
+                    # Add a column so we know which site the job came from
+                    df["Source URL"] = url
+                    all_results.append(df)
+            except Exception as e:
+                st.error(f"Error scanning {url}: {e}")
+            
+            # Update progress
+            progress_bar.progress((i + 1) / len(url_list))
+        
+        status_text.empty() # Clear the status when finished
 
+        # --- FINAL RESULTS ---
         if all_results:
             final_df = pd.concat(all_results, ignore_index=True).drop_duplicates()
-            st.success(f"✅ Done! Found {len(final_df)} matching jobs.")
+            st.success(f"🎊 Finished! Found {len(final_df)} matching jobs across your list.")
+            
+            # Display Interactive Table
             st.dataframe(final_df, use_container_width=True)
 
-            csv = final_df.to_csv(index=False).encode("utf-8")
+            # Download CSV
+            csv_data = final_df.to_csv(index=False).encode("utf-8")
             st.download_button(
-                "📥 Download All Results",
-                csv,
-                "tracked_jobs.csv",
-                "text/csv"
+                label="📥 Download Master Job List (CSV)",
+                data=csv_data,
+                file_name="scraped_jobs_report.csv",
+                mime="text/csv"
             )
         else:
-            st.warning("No jobs found matching your criteria across these sites.")
-else:
-    st.info("No websites added yet. Use the form above to add your first company.")
+            st.warning("No matching jobs were found on any of the provided sites.")
 
-# --- DEBUG (Hidden by default) ---
-with st.expander("🛠️ System Debug"):
-    st.write("Current Keywords List:", keywords)
-    st.write("Session State:", st.session_state.tracked_sites)
+# --- FOOTER / DEBUG ---
+with st.expander("🛠️ System Metadata"):
+    st.write("Current Master Keyword List:", master_keywords)
+    st.write("Detected URLs:", url_list)
