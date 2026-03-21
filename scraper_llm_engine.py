@@ -16,12 +16,14 @@ def ai_agent_scraper(url, keywords):
     LAYER 2: Uses Jina Reader + Llama 3.3 to find jobs normal scraping missed.
     """
     # 1. Jina Reader (Convert URL to clean Markdown)
+    # This acts as the bridge for the LLM to 'see' the website content
     reader_url = f"https://r.jina.ai/{url}"
     try:
         response = requests.get(reader_url, timeout=15)
-        content = response.text[:12000] # Stay within token limits
+        # We cap the content to 12,000 characters to stay within model limits
+        content = response.text[:12000] 
     except Exception as e:
-        print(f"Jina Error: {e}")
+        print(f"Jina Reader Error: {e}")
         return pd.DataFrame()
 
     # 2. OpenRouter API Setup
@@ -30,13 +32,19 @@ def ai_agent_scraper(url, keywords):
         api_key=OPENROUTER_API_KEY,
     )
     
-    # We use a very strict prompt for the Free model
+    # 3. Enhanced Prompt for better Link extraction
     prompt = f"""
-    Find all job openings matching these interests: {keywords}.
+    Act as a job recruiter. I am interested in these topics: {keywords}.
+    From the provided text, find all job openings that match these interests.
+    
+    IMPORTANT: 
+    If a job link is relative (e.g., starts with '/'), you MUST prepend it with the base domain: {url}.
+    
     Return ONLY a JSON object with a key 'jobs' containing a list of objects.
     Each object must have: 'Title', 'Location', and 'Link'.
+    If no jobs match, return {{"jobs": []}}.
     
-    TEXT:
+    TEXT TO ANALYZE:
     {content}
     """
 
@@ -44,11 +52,11 @@ def ai_agent_scraper(url, keywords):
         chat = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],
-            # Note: response_format is used, but we handle the string just in case
+            # Note: We use json_object format for cleaner parsing
             response_format={ "type": "json_object" } 
         )
         
-        # 3. Robust JSON Parsing
+        # 4. Robust JSON Parsing
         raw_content = chat.choices[0].message.content.strip()
         
         # Remove potential markdown backticks if the model adds them
@@ -58,9 +66,13 @@ def ai_agent_scraper(url, keywords):
         data = json.loads(raw_content)
         jobs = data.get("jobs", [])
         
-        return pd.DataFrame(jobs)
+        # Create DataFrame and add the identification method
+        df = pd.DataFrame(jobs)
+        if not df.empty:
+            df["Method"] = "AI Agent (Llama 3.3)"
+            
+        return df
 
     except Exception as e:
-        # Silently fail so the app continues to the next URL
-        print(f"LLM Error on {url}: {e}")
+        print(f"OpenRouter Error on {url}: {e}")
         return pd.DataFrame()
