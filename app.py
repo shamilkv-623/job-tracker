@@ -1,122 +1,111 @@
 import streamlit as st
 import pandas as pd
+import json
+import os
+from datetime import datetime, timedelta
+from io import BytesIO
 from scraper_engine import generic_scraper
 from utils import extract_text_from_pdf, extract_keywords_from_cv
 
-# --- 1. CONFIG & SESSION STATE ---
-st.set_page_config(page_title="AI Job Tracker", layout="wide", page_icon="🚀")
+# --- 1. DATA PERSISTENCE HELPERS ---
+DB_FILE = "user_data.json"
 
-# This keeps your website list alive even when you add new ones
-if "target_sites" not in st.session_state:
-    st.session_state.target_sites = []
+def load_data():
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
-st.title("🚀 AI-Powered Job Tracker")
+def save_data(data):
+    with open(DB_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
-# --- 2. STEP 1: GLOBAL KEYWORDS ---
-st.subheader("🎯 Step 1: Define Your Master Keywords")
-st.info("These keywords will apply to EVERY website you add below.")
+# --- 2. CONFIG ---
+st.set_page_config(page_title="AI Job Monitor", layout="wide")
+db = load_data()
 
-col_k1, col_k2 = st.columns([2, 1])
-with col_k1:
-    manual_keywords = st.text_input(
-        "🔑 Master Keywords (comma separated)",
-        placeholder="e.g. quant, data scientist, risk",
-        key="master_k_input"
-    )
-with col_k2:
-    uploaded_file = st.file_uploader("📄 Upload CV (PDF)", type=["pdf"])
+# --- 3. USER AUTHENTICATION ---
+st.sidebar.title("👤 User Portal")
+username = st.sidebar.text_input("Enter Username", value="Guest").strip().lower()
 
-# Consolidate Keywords
-master_keywords = []
-if uploaded_file:
-    with st.spinner("Reading CV..."):
-        text = extract_text_from_pdf(uploaded_file)
-        master_keywords.extend(extract_keywords_from_cv(text))
+if username not in db:
+    db[username] = {"keywords": [], "urls": [], "last_run": None}
+    save_data(db)
 
-if manual_keywords:
-    manual_list = [k.strip().lower() for k in manual_keywords.split(",") if k.strip()]
-    master_keywords.extend(manual_list)
+user_profile = db[username]
 
-master_keywords = list(set(master_keywords)) # Deduplicate
+# --- 4. DASHBOARD UI ---
+st.title(f"🚀 {username.capitalize()}'s Job Dashboard")
 
-if master_keywords:
-    st.success(f"✅ **Targeting:** {', '.join(master_keywords)}")
+# Check for 24hr update status
+if user_profile["last_run"]:
+    last_run_dt = datetime.fromisoformat(user_profile["last_run"])
+    next_run_dt = last_run_dt + timedelta(hours=24)
+    st.sidebar.write(f"📅 **Last Scan:** {last_run_dt.strftime('%Y-%m-%d %H:%M')}")
+    if datetime.now() > next_run_dt:
+        st.sidebar.warning("⚠️ Scrape is over 24h old. Update recommended!")
+
+# --- STEP 1: KEYWORDS ---
+with st.expander("🎯 Edit My Search Profile", expanded=not user_profile["keywords"]):
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        new_k = st.text_input("Add Keywords (comma separated)", value=", ".join(user_profile["keywords"]))
+    with col2:
+        up_file = st.file_uploader("Update CV (PDF)", type=["pdf"])
+    
+    if st.button("Save Profile"):
+        keywords = [k.strip().lower() for k in new_k.split(",") if k.strip()]
+        if up_file:
+            keywords.extend(extract_keywords_from_cv(extract_text_from_pdf(up_file)))
+        user_profile["keywords"] = list(set(keywords))
+        save_data(db)
+        st.success("Profile Updated!")
+        st.rerun()
+
+# --- STEP 2: TRACKED SITES ---
+st.subheader("🌐 My Monitored Sites")
+new_url = st.text_input("🔗 Add New Careers URL")
+if st.button("➕ Add to My List"):
+    if new_url and new_url not in user_profile["urls"]:
+        user_profile["urls"].append(new_url)
+        save_data(db)
+        st.rerun()
+
+# List & Remove
+for i, url in enumerate(user_profile["urls"]):
+    c1, c2 = st.columns([9, 1])
+    c1.caption(url)
+    if c2.button("🗑️", key=f"del_{i}"):
+        user_profile["urls"].pop(i)
+        save_data(db)
+        st.rerun()
 
 st.divider()
 
-# --- 3. STEP 2: BUILD YOUR LIST ---
-st.subheader("🌐 Step 2: Build Your Target List")
-
-col_url, col_btn = st.columns([4, 1])
-with col_url:
-    new_url = st.text_input("🔗 Enter Careers Page URL", placeholder="https://company.com/careers")
-with col_btn:
-    st.write(" ") # Padding
-    if st.button("➕ Add Website", use_container_width=True):
-        if new_url:
-            if new_url not in st.session_state.target_sites:
-                st.session_state.target_sites.append(new_url)
-                st.toast(f"Added {new_url}!", icon="📍")
-                st.rerun()
-            else:
-                st.warning("This URL is already in your list.")
-        else:
-            st.error("Please enter a URL first.")
-
-# --- DISPLAY THE LIST ---
-if st.session_state.target_sites:
-    st.write(f"**Your Websites ({len(st.session_state.target_sites)}):**")
-    for i, site in enumerate(st.session_state.target_sites):
-        c1, c2 = st.columns([9, 1])
-        c1.caption(f"{i+1}. {site}")
-        if c2.button("🗑️", key=f"del_{i}"):
-            st.session_state.target_sites.pop(i)
-            st.rerun()
-else:
-    st.info("Your list is empty. Add a URL above.")
-
-st.divider()
-
-# --- 4. STEP 3: EXECUTION ---
-st.subheader("🚀 Step 3: Run Monitoring")
-
-if st.button("🔥 START SCRAPING ALL SITES", type="primary", use_container_width=True):
-    if not st.session_state.target_sites:
-        st.error("❌ Add at least one website in Step 2.")
-    elif not master_keywords:
-        st.error("❌ No keywords detected in Step 1.")
+# --- STEP 3: EXECUTION ---
+if st.button("🔥 RUN 24-HOUR REFRESH", type="primary", use_container_width=True):
+    if not user_profile["urls"] or not user_profile["keywords"]:
+        st.error("Missing URLs or Keywords!")
     else:
-        all_results = []
-        progress_bar = st.progress(0)
-        status = st.empty()
+        results = []
+        bar = st.progress(0)
+        for i, url in enumerate(user_profile["urls"]):
+            df = generic_scraper(url, user_profile["keywords"])
+            if not df.empty:
+                df["Source"] = url
+                results.append(df)
+            bar.progress((i+1)/len(user_profile["urls"]))
         
-        for i, url in enumerate(st.session_state.target_sites):
-            status.info(f"Scanning ({i+1}/{len(st.session_state.target_sites)}): {url}...")
-            
-            try:
-                # Scrape using the MASTER KEYWORDS from Step 1
-                df = generic_scraper(url, master_keywords)
-                if not df.empty and "Error" not in df.columns:
-                    df["Source URL"] = url
-                    all_results.append(df)
-            except Exception as e:
-                st.error(f"Error on {url}: {e}")
-            
-            progress_bar.progress((i + 1) / len(st.session_state.target_sites))
-        
-        status.empty()
-
-        if all_results:
-            final_df = pd.concat(all_results, ignore_index=True).drop_duplicates()
-            st.success(f"🎊 Done! Found {len(final_df)} jobs matching your keywords.")
+        if results:
+            final_df = pd.concat(results, ignore_index=True)
+            st.session_state.current_results = final_df
+            user_profile["last_run"] = datetime.now().isoformat()
+            save_data(db)
+            st.success("Scan Complete!")
             st.dataframe(final_df, use_container_width=True)
             
-            csv = final_df.to_csv(index=False).encode("utf-8")
-            st.download_button("📥 Download Results (CSV)", csv, "jobs_report.csv", "text/csv")
-        else:
-            st.warning("No matching jobs found across all sites.")
-
-# --- FOOTER ---
-with st.expander("🛠️ Debug Information"):
-    st.write("Keywords being used:", master_keywords)
-    st.write("Site List:", st.session_state.target_sites)
+            # Excel Download
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                final_df.to_excel(writer, index=False)
+            st.download_button("📥 Download Excel", output.getvalue(), f"{username}_jobs.xlsx")
