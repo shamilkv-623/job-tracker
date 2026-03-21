@@ -1,111 +1,194 @@
 import streamlit as st
 import pandas as pd
-import json
-import os
-from datetime import datetime, timedelta
+import sqlite3
+import bcrypt
 from io import BytesIO
+from datetime import datetime
 from scraper_engine import generic_scraper
 from utils import extract_text_from_pdf, extract_keywords_from_cv
 
-# --- 1. DATA PERSISTENCE HELPERS ---
-DB_FILE = "user_data.json"
+# --- 1. DATABASE SETUP ---
+def init_db():
+    conn = sqlite3.connect('job_tracker.db')
+    c = conn.cursor()
+    # Table for User Credentials
+    c.execute('''CREATE TABLE IF NOT EXISTS users 
+                 (username TEXT PRIMARY KEY, password TEXT, keywords TEXT)''')
+    # Table for Tracked URLs
+    c.execute('''CREATE TABLE IF NOT EXISTS urls 
+                 (username TEXT, url TEXT, UNIQUE(username, url))''')
+    conn.commit()
+    conn.close()
 
-def load_data():
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f:
-            return json.load(f)
-    return {}
+def add_user(username, password):
+    conn = sqlite3.connect('job_tracker.db')
+    c = conn.cursor()
+    hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    try:
+        c.execute("INSERT INTO users (username, password, keywords) VALUES (?, ?, ?)", (username, hashed, ""))
+        conn.commit()
+        return True
+    except:
+        return False
+    finally:
+        conn.close()
 
-def save_data(data):
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+def check_user(username, password):
+    conn = sqlite3.connect('job_tracker.db')
+    c = conn.cursor()
+    c.execute("SELECT password FROM users WHERE username = ?", (username,))
+    result = c.fetchone()
+    conn.close()
+    if result and bcrypt.checkpw(password.encode('utf-8'), result[0].encode('utf-8')):
+        return True
+    return False
 
-# --- 2. CONFIG ---
+# --- 2. CONFIG & INIT ---
 st.set_page_config(page_title="AI Job Monitor", layout="wide")
-db = load_data()
+init_db()
 
-# --- 3. USER AUTHENTICATION ---
-st.sidebar.title("👤 User Portal")
-username = st.sidebar.text_input("Enter Username", value="Guest").strip().lower()
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+    st.session_state.username = ""
 
-if username not in db:
-    db[username] = {"keywords": [], "urls": [], "last_run": None}
-    save_data(db)
-
-user_profile = db[username]
-
-# --- 4. DASHBOARD UI ---
-st.title(f"🚀 {username.capitalize()}'s Job Dashboard")
-
-# Check for 24hr update status
-if user_profile["last_run"]:
-    last_run_dt = datetime.fromisoformat(user_profile["last_run"])
-    next_run_dt = last_run_dt + timedelta(hours=24)
-    st.sidebar.write(f"📅 **Last Scan:** {last_run_dt.strftime('%Y-%m-%d %H:%M')}")
-    if datetime.now() > next_run_dt:
-        st.sidebar.warning("⚠️ Scrape is over 24h old. Update recommended!")
-
-# --- STEP 1: KEYWORDS ---
-with st.expander("🎯 Edit My Search Profile", expanded=not user_profile["keywords"]):
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        new_k = st.text_input("Add Keywords (comma separated)", value=", ".join(user_profile["keywords"]))
-    with col2:
-        up_file = st.file_uploader("Update CV (PDF)", type=["pdf"])
+# --- 3. LOGIN / SIGNUP UI ---
+if not st.session_state.logged_in:
+    st.title("🔐 AI Job Tracker Login")
+    tab1, tab2 = st.tabs(["Login", "Create Account"])
     
-    if st.button("Save Profile"):
-        keywords = [k.strip().lower() for k in new_k.split(",") if k.strip()]
-        if up_file:
-            keywords.extend(extract_keywords_from_cv(extract_text_from_pdf(up_file)))
-        user_profile["keywords"] = list(set(keywords))
-        save_data(db)
-        st.success("Profile Updated!")
-        st.rerun()
+    with tab1:
+        u = st.text_input("Username", key="login_u")
+        p = st.text_input("Password", type="password", key="login_p")
+        if st.button("Login"):
+            if check_user(u, p):
+                st.session_state.logged_in = True
+                st.session_state.username = u
+                st.rerun()
+            else:
+                st.error("Invalid username or password")
+                
+    with tab2:
+        new_u = st.text_input("Choose Username", key="reg_u")
+        new_p = st.text_input("Choose Password", type="password", key="reg_p")
+        if st.button("Register"):
+            if add_user(new_u, new_p):
+                st.success("Account created! You can now login.")
+            else:
+                st.error("Username already exists.")
+    st.stop() # Prevents the rest of the app from running until logged in
 
-# --- STEP 2: TRACKED SITES ---
-st.subheader("🌐 My Monitored Sites")
-new_url = st.text_input("🔗 Add New Careers URL")
+# --- 4. THE DASHBOARD (LOGGED IN) ---
+username = st.session_state.username
+st.sidebar.title(f"👋 Welcome, {username}!")
+if st.sidebar.button("Logout"):
+    st.session_state.logged_in = False
+    st.rerun()
+
+st.title("🚀 Your Job Monitoring Dashboard")
+
+# --- DATABASE FETCHERS ---
+def get_user_keywords():
+    conn = sqlite3.connect('job_tracker.db')
+    c = conn.cursor()
+    c.execute("SELECT keywords FROM users WHERE username = ?", (username,))
+    res = c.fetchone()[0]
+    conn.close()
+    return res.split(",") if res else []
+
+def save_user_keywords(kw_list):
+    conn = sqlite3.connect('job_tracker.db')
+    c = conn.cursor()
+    c.execute("UPDATE users SET keywords = ? WHERE username = ?", (",".join(kw_list), username))
+    conn.commit()
+    conn.close()
+
+def get_user_urls():
+    conn = sqlite3.connect('job_tracker.db')
+    c = conn.cursor()
+    c.execute("SELECT url FROM urls WHERE username = ?", (username,))
+    res = [row[0] for row in c.fetchall()]
+    conn.close()
+    return res
+
+# --- UI LOGIC ---
+st.subheader("🎯 Step 1: Your Master Profile")
+current_keywords = get_user_keywords()
+col_k1, col_k2 = st.columns([2, 1])
+
+with col_k1:
+    kw_input = st.text_input("Edit Keywords (comma separated)", value=", ".join(current_keywords))
+with col_k2:
+    uploaded_file = st.file_uploader("Update via CV (PDF)", type=["pdf"])
+
+if st.button("💾 Save Profile Settings"):
+    updated_kw = [k.strip().lower() for k in kw_input.split(",") if k.strip()]
+    if uploaded_file:
+        text = extract_text_from_pdf(uploaded_file)
+        updated_kw.extend(extract_keywords_from_cv(text))
+    save_user_keywords(list(set(updated_kw)))
+    st.success("Profile saved!")
+    st.rerun()
+
+st.divider()
+
+st.subheader("🌐 Step 2: Your Tracked Companies")
+new_url = st.text_input("Add Careers Page URL")
 if st.button("➕ Add to My List"):
-    if new_url and new_url not in user_profile["urls"]:
-        user_profile["urls"].append(new_url)
-        save_data(db)
-        st.rerun()
+    if new_url:
+        conn = sqlite3.connect('job_tracker.db')
+        c = conn.cursor()
+        try:
+            c.execute("INSERT INTO urls (username, url) VALUES (?, ?)", (username, new_url))
+            conn.commit()
+            st.rerun()
+        except:
+            st.warning("Already tracking this URL.")
+        finally:
+            conn.close()
 
-# List & Remove
-for i, url in enumerate(user_profile["urls"]):
+# List Tracked URLs
+user_urls = get_user_urls()
+for i, url in enumerate(user_urls):
     c1, c2 = st.columns([9, 1])
-    c1.caption(url)
+    c1.caption(f"📍 {url}")
     if c2.button("🗑️", key=f"del_{i}"):
-        user_profile["urls"].pop(i)
-        save_data(db)
+        conn = sqlite3.connect('job_tracker.db')
+        c = conn.cursor()
+        c.execute("DELETE FROM urls WHERE username = ? AND url = ?", (username, url))
+        conn.commit()
+        conn.close()
         st.rerun()
 
 st.divider()
 
 # --- STEP 3: EXECUTION ---
-if st.button("🔥 RUN 24-HOUR REFRESH", type="primary", use_container_width=True):
-    if not user_profile["urls"] or not user_profile["keywords"]:
-        st.error("Missing URLs or Keywords!")
+st.subheader("🔍 Step 3: Run 24hr Refresh")
+if st.button("🔥 SCAN ALL SITES NOW", type="primary", use_container_width=True):
+    keywords = get_user_keywords()
+    if not user_urls or not keywords:
+        st.error("Please add keywords and URLs first.")
     else:
-        results = []
-        bar = st.progress(0)
-        for i, url in enumerate(user_profile["urls"]):
-            df = generic_scraper(url, user_profile["keywords"])
-            if not df.empty:
-                df["Source"] = url
-                results.append(df)
-            bar.progress((i+1)/len(user_profile["urls"]))
+        all_results = []
+        progress = st.progress(0)
+        status = st.empty()
         
-        if results:
-            final_df = pd.concat(results, ignore_index=True)
-            st.session_state.current_results = final_df
-            user_profile["last_run"] = datetime.now().isoformat()
-            save_data(db)
-            st.success("Scan Complete!")
+        for i, url in enumerate(user_urls):
+            status.info(f"Scanning: {url}...")
+            df = generic_scraper(url, keywords)
+            if not df.empty:
+                df["Company URL"] = url
+                all_results.append(df)
+            progress.progress((i+1)/len(user_urls))
+        
+        status.empty()
+        if all_results:
+            final_df = pd.concat(all_results).drop_duplicates()
             st.dataframe(final_df, use_container_width=True)
             
             # Excel Download
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 final_df.to_excel(writer, index=False)
-            st.download_button("📥 Download Excel", output.getvalue(), f"{username}_jobs.xlsx")
+            st.download_button("📥 Download Excel Report", output.getvalue(), f"{username}_jobs.xlsx")
+        else:
+            st.warning("No new jobs found matching your criteria.")
