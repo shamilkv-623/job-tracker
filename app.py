@@ -4,8 +4,7 @@ import sqlite3
 import bcrypt
 import time
 from io import BytesIO
-# FIX: Explicit import to avoid NameError in the download button
-from datetime import datetime 
+from datetime import datetime
 
 # Import the new coordinator from your engine
 from scraper_engine import smart_scraper 
@@ -15,8 +14,10 @@ from utils import extract_text_from_pdf, extract_keywords_from_cv
 def init_db():
     conn = sqlite3.connect('job_tracker.db')
     c = conn.cursor()
+    # Users table
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (username TEXT PRIMARY KEY, password TEXT, keywords TEXT)''')
+    # URLs table
     c.execute('''CREATE TABLE IF NOT EXISTS urls 
                  (username TEXT, url TEXT, UNIQUE(username, url))''')
     conn.commit()
@@ -161,7 +162,7 @@ for i, url in enumerate(user_urls):
 
 st.divider()
 
-# --- UI: STEP 3 (MODIFIED EXECUTION) ---
+# --- UI: STEP 3 (EXECUTION) ---
 st.subheader("🔍 Step 3: Run AI Refresh")
 if st.button("🔥 START MULTI-SITE SCAN", type="primary", use_container_width=True):
     keywords = get_user_keywords(username)
@@ -170,32 +171,35 @@ if st.button("🔥 START MULTI-SITE SCAN", type="primary", use_container_width=T
         st.error("Please add keywords and URLs first.")
     else:
         all_results = []
-        progress = st.progress(0)
-        status_log = st.empty()
+        progress_bar = st.progress(0)
         
-        for i, url in enumerate(user_urls):
-            status_log.info(f"Scanning: {url}...")
+        # Use a status container for a cleaner UI
+        with st.status("🚀 Multi-Site AI Scan in Progress...", expanded=True) as status:
+            for i, url in enumerate(user_urls):
+                status.write(f"Analyzing: {url}...")
+                
+                # --- CALLING THE SMART COORDINATOR ---
+                # This automatically handles Layer 1 (Soup) and Layer 2 (LLM Fallback)
+                df = smart_scraper(url, keywords)
+                
+                if not df.empty:
+                    df["Company URL"] = url
+                    all_results.append(df)
+                
+                # Progress update
+                progress_bar.progress((i + 1) / len(user_urls))
+                
+                # Rate limit buffer for the Free LLM tier
+                time.sleep(1.5) 
             
-            # --- MODIFIED: CALLING THE 2-LAYER SMART SCRAPER ---
-            # This calls Layer 1 (BeautifulSoup) first, then Layer 2 (LLM) if needed.
-            df = smart_scraper(url, keywords)
-            
-            if not df.empty:
-                df["Source"] = url
-                all_results.append(df)
-            
-            # Keep a small buffer to avoid hitting rate limits on the AI fallback
-            time.sleep(2) 
-            progress.progress((i+1)/len(user_urls))
-        
-        status_log.empty()
-        
+            status.update(label="✅ Scan Complete!", state="complete", expanded=False)
+
         if all_results:
             final_df = pd.concat(all_results, ignore_index=True).drop_duplicates()
-            st.success(f"Scan complete! Found {len(final_df)} potential matches.")
+            st.success(f"Found {len(final_df)} potential matches.")
             st.dataframe(final_df, use_container_width=True)
             
-            # Excel Download
+            # Excel Download logic
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 final_df.to_excel(writer, index=False)
@@ -207,4 +211,4 @@ if st.button("🔥 START MULTI-SITE SCAN", type="primary", use_container_width=T
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.warning("No new matching jobs found.")
+            st.warning("No matching jobs found across these sites.")
