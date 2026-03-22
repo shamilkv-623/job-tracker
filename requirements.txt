@@ -1,10 +1,20 @@
+# Web Framework & Data
 streamlit
 pandas
+openpyxl
+
+# Scraping & Processing
 requests
 beautifulsoup4
 lxml
 PyPDF2
-bcrypt
-openpyxl
+
+# AI & Logic
 openai
 python-dotenv
+bcrypt
+
+# --- NEW: Cloud Database (Supabase/PostgreSQL) ---
+sqlalchemy
+psycopg2-binary
+st-postgresql
