@@ -1,77 +1,62 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
 import bcrypt
 import time
 from io import BytesIO
 from datetime import datetime
+from sqlalchemy import text
 
-# Import the new coordinator from your engine
+# Import your engine
 from scraper_engine import smart_scraper 
 from utils import extract_text_from_pdf, extract_keywords_from_cv
 
-# --- 1. DATABASE SETUP & HELPERS ---
-def init_db():
-    conn = sqlite3.connect('job_tracker.db')
-    c = conn.cursor()
-    # Users table
-    c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (username TEXT PRIMARY KEY, password TEXT, keywords TEXT)''')
-    # URLs table
-    c.execute('''CREATE TABLE IF NOT EXISTS urls 
-                 (username TEXT, url TEXT, UNIQUE(username, url))''')
-    conn.commit()
-    conn.close()
+# --- 1. DATABASE CONNECTION ---
+# This uses the connection string in your .streamlit/secrets.toml
+conn = st.connection("postgresql", type="sql")
 
 def add_user(username, password):
-    conn = sqlite3.connect('job_tracker.db')
-    c = conn.cursor()
     hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
     try:
-        c.execute("INSERT INTO users (username, password, keywords) VALUES (?, ?, ?)", (username, hashed, ""))
-        conn.commit()
+        with conn.session as s:
+            s.execute(
+                text("INSERT INTO users (username, password, keywords) VALUES (:u, :p, :k)"),
+                {"u": username, "p": hashed, "k": ""}
+            )
+            s.commit()
         return True
-    except: return False
-    finally: conn.close()
+    except Exception:
+        return False
 
 def check_user(username, password):
-    conn = sqlite3.connect('job_tracker.db')
-    c = conn.cursor()
-    c.execute("SELECT password FROM users WHERE username = ?", (username,))
-    result = c.fetchone()
-    conn.close()
-    if result and bcrypt.checkpw(password.encode('utf-8'), result[0].encode('utf-8')):
-        return True
+    res = conn.query("SELECT password FROM users WHERE username = :u", 
+                     params={"u": username}, ttl=0)
+    if not res.empty:
+        hashed = res.iloc[0]['password']
+        return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
     return False
 
 def get_user_keywords(username):
-    conn = sqlite3.connect('job_tracker.db')
-    c = conn.cursor()
-    c.execute("SELECT keywords FROM users WHERE username = ?", (username,))
-    res = c.fetchone()
-    conn.close()
-    if res and res[0]:
-        return [k.strip() for k in res[0].split(",") if k.strip()]
+    res = conn.query("SELECT keywords FROM users WHERE username = :u", 
+                     params={"u": username}, ttl=0)
+    if not res.empty and res.iloc[0]['keywords']:
+        return [k.strip() for k in res.iloc[0]['keywords'].split(",") if k.strip()]
     return []
 
 def save_user_keywords(username, kw_list):
-    conn = sqlite3.connect('job_tracker.db')
-    c = conn.cursor()
-    c.execute("UPDATE users SET keywords = ? WHERE username = ?", (",".join(kw_list), username))
-    conn.commit()
-    conn.close()
+    with conn.session as s:
+        s.execute(
+            text("UPDATE users SET keywords = :k WHERE username = :u"),
+            {"k": ",".join(kw_list), "u": username}
+        )
+        s.commit()
 
 def get_user_urls(username):
-    conn = sqlite3.connect('job_tracker.db')
-    c = conn.cursor()
-    c.execute("SELECT url FROM urls WHERE username = ?", (username,))
-    res = [row[0] for row in c.fetchall()]
-    conn.close()
-    return res
+    df = conn.query("SELECT url FROM urls WHERE username = :u", 
+                    params={"u": username}, ttl=0)
+    return df['url'].tolist() if not df.empty else []
 
 # --- 2. APP CONFIG ---
 st.set_page_config(page_title="Horizon AI | Career Monitor", layout="wide", page_icon="🚀")
-init_db()
 
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -79,7 +64,7 @@ if "logged_in" not in st.session_state:
 
 # --- 3. LOGIN / SIGNUP UI ---
 if not st.session_state.logged_in:
-    st.title("🔐 AI Job Tracker Login")
+    st.title("🔐 AI Job Tracker Login (Cloud)")
     tab1, tab2 = st.tabs(["Login", "Create Account"])
     
     with tab1:
@@ -124,8 +109,8 @@ if st.button("💾 Save Profile Settings"):
     updated_kw = [k.strip().lower() for k in kw_input.split(",") if k.strip()]
     if uploaded_file:
         with st.spinner("Extracting insights from PDF..."):
-            text = extract_text_from_pdf(uploaded_file)
-            updated_kw.extend(extract_keywords_from_cv(text))
+            text_cv = extract_text_from_pdf(uploaded_file)
+            updated_kw.extend(extract_keywords_from_cv(text_cv))
     
     final_kw_list = list(set(updated_kw))
     save_user_keywords(username, final_kw_list)
@@ -139,59 +124,57 @@ st.subheader("🌐 Step 2: Your Tracked Companies")
 new_url = st.text_input("Add Career Portal URL")
 if st.button("➕ Add to My List"):
     if new_url:
-        conn = sqlite3.connect('job_tracker.db')
-        c = conn.cursor()
         try:
-            c.execute("INSERT INTO urls (username, url) VALUES (?, ?)", (username, new_url))
-            conn.commit()
+            with conn.session as s:
+                s.execute(text("INSERT INTO urls (username, url) VALUES (:u, :url)"),
+                          {"u": username, "url": new_url})
+                s.commit()
             st.rerun()
         except: st.warning("Site already in your list.")
-        finally: conn.close()
 
 user_urls = get_user_urls(username)
 for i, url in enumerate(user_urls):
     c1, c2 = st.columns([9, 1])
     c1.caption(f"📍 {url}")
     if c2.button("🗑️", key=f"del_{i}"):
-        conn = sqlite3.connect('job_tracker.db')
-        c = conn.cursor()
-        c.execute("DELETE FROM urls WHERE username = ? AND url = ?", (username, url))
-        conn.commit()
-        conn.close()
+        with conn.session as s:
+            s.execute(text("DELETE FROM urls WHERE username = :u AND url = :url"),
+                      {"u": username, "url": url})
+            s.commit()
         st.rerun()
 
 st.divider()
 
-# --- UI: STEP 3 (EXECUTION) ---
-st.subheader("🔍 Step 3: Run AI Refresh")
+# --- NEW SECTION: AUTOMATED RESULTS ---
+st.subheader("🔔 Found by 24h Bot")
+auto_df = conn.query("SELECT job_title, company_url, date_found FROM scan_results WHERE username = :u ORDER BY date_found DESC", 
+                     params={"u": username}, ttl=0)
+
+if not auto_df.empty:
+    st.dataframe(auto_df, use_container_width=True)
+else:
+    st.info("The automated scanner hasn't found any new matches yet.")
+
+st.divider()
+
+# --- UI: STEP 3 (MANUAL EXECUTION) ---
+st.subheader("🔍 Step 3: Run Immediate AI Refresh")
 if st.button("🔥 START MULTI-SITE SCAN", type="primary", use_container_width=True):
     keywords = get_user_keywords(username)
-    
     if not user_urls or not keywords:
         st.error("Please add keywords and URLs first.")
     else:
         all_results = []
         progress_bar = st.progress(0)
-        
-        # Use a status container for a cleaner UI
         with st.status("🚀 Multi-Site AI Scan in Progress...", expanded=True) as status:
             for i, url in enumerate(user_urls):
                 status.write(f"Analyzing: {url}...")
-                
-                # --- CALLING THE SMART COORDINATOR ---
-                # This automatically handles Layer 1 (Soup) and Layer 2 (LLM Fallback)
                 df = smart_scraper(url, keywords)
-                
                 if not df.empty:
                     df["Company URL"] = url
                     all_results.append(df)
-                
-                # Progress update
                 progress_bar.progress((i + 1) / len(user_urls))
-                
-                # Rate limit buffer for the Free LLM tier
                 time.sleep(1.5) 
-            
             status.update(label="✅ Scan Complete!", state="complete", expanded=False)
 
         if all_results:
@@ -199,7 +182,6 @@ if st.button("🔥 START MULTI-SITE SCAN", type="primary", use_container_width=T
             st.success(f"Found {len(final_df)} potential matches.")
             st.dataframe(final_df, use_container_width=True)
             
-            # Excel Download logic
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 final_df.to_excel(writer, index=False)
