@@ -7,13 +7,29 @@ from datetime import datetime
 from sqlalchemy import text
 
 # Import your engine
-from scraper_engine import smart_scraper 
+from scraper_engine import smart_scraper
 from utils import extract_text_from_pdf, extract_keywords_from_cv
 
-# --- 1. DATABASE CONNECTION ---
-# This uses the connection string in your .streamlit/secrets.toml
+# --- 0. INITIALIZE DATABASE TABLES ---
+# This ensures tables exist if they weren't created manually
 conn = st.connection("postgresql", type="sql")
 
+def init_db():
+    with conn.session as s:
+        s.execute(text("CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, keywords TEXT)"))
+        s.execute(text("CREATE TABLE IF NOT EXISTS urls (username TEXT, url TEXT, UNIQUE(username, url))"))
+        s.execute(text("""
+            CREATE TABLE IF NOT EXISTS scan_results (
+                id SERIAL PRIMARY KEY, 
+                username TEXT, 
+                job_title TEXT, 
+                company_url TEXT, 
+                date_found TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        s.commit()
+
+# --- 1. DATABASE HELPERS ---
 def add_user(username, password):
     hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
     try:
@@ -57,6 +73,7 @@ def get_user_urls(username):
 
 # --- 2. APP CONFIG ---
 st.set_page_config(page_title="Horizon AI | Career Monitor", layout="wide", page_icon="🚀")
+init_db() # Run table creation check
 
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -130,7 +147,8 @@ if st.button("➕ Add to My List"):
                           {"u": username, "url": new_url})
                 s.commit()
             st.rerun()
-        except: st.warning("Site already in your list.")
+        except Exception: 
+            st.warning("Site already in your list.")
 
 user_urls = get_user_urls(username)
 for i, url in enumerate(user_urls):
@@ -147,13 +165,17 @@ st.divider()
 
 # --- NEW SECTION: AUTOMATED RESULTS ---
 st.subheader("🔔 Found by 24h Bot")
-auto_df = conn.query("SELECT job_title, company_url, date_found FROM scan_results WHERE username = :u ORDER BY date_found DESC", 
-                     params={"u": username}, ttl=0)
+# We use a try-except here in case the table isn't populated yet
+try:
+    auto_df = conn.query("SELECT job_title, company_url, date_found FROM scan_results WHERE username = :u ORDER BY date_found DESC", 
+                         params={"u": username}, ttl=0)
 
-if not auto_df.empty:
-    st.dataframe(auto_df, use_container_width=True)
-else:
-    st.info("The automated scanner hasn't found any new matches yet.")
+    if not auto_df.empty:
+        st.dataframe(auto_df, use_container_width=True)
+    else:
+        st.info("The automated scanner hasn't found any new matches yet.")
+except Exception:
+    st.info("Scanner results will appear here once the first bot-run completes.")
 
 st.divider()
 
