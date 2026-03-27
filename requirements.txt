@@ -1,13 +1,7 @@
 streamlit
 pandas
+bcrypt
 requests
 beautifulsoup4
-lxml
-PyPDF2
-bcrypt
-openpyxl
-openai
-python-dotenv
-sqlalchemy
 psycopg2-binary
-st-postgresql
+sqlalchemy
