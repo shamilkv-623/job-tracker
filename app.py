@@ -13,7 +13,6 @@ st.set_page_config(page_title="Horizon AI | Career Monitor", layout="wide", page
 # ---------------- DB CONNECTION ----------------
 @st.cache_resource
 def get_connection():
-    # Uses [connections.postgresql] from your secrets.toml
     return st.connection("postgresql", type="sql")
 
 conn = get_connection()
@@ -79,30 +78,36 @@ def update_user_settings(user_id: int, keywords: str, url: str):
         st.error(f"Save Error: {e}")
         return False
 
-# ---------------- SCRAPER (LIST-BASED IDEA) ----------------
+# --- MULTI-SITE DB HELPERS ---
+def get_monitored_sites(user_id):
+    return conn.query("SELECT id, url FROM monitored_sites WHERE user_id = :uid", params={"uid": user_id}, ttl=0)
+
+def add_monitored_site(user_id, url):
+    try:
+        with conn.session as s:
+            s.execute(
+                text("INSERT INTO monitored_sites (user_id, url) VALUES (:uid, :url)"),
+                {"uid": user_id, "url": url}
+            )
+            s.commit()
+        return True
+    except Exception as e:
+        st.error(f"Error adding site: {e}")
+        return False
+
+# ---------------- SCRAPER ----------------
 def quick_scrape(url: str, keywords_str: str):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, "html.parser")
-        
-        # Clean keywords from user profile
         keyword_list = [k.strip().lower() for k in keywords_str.split(",")] if keywords_str else []
         jobs = []
-
-        # Scrape links that look like job titles or contain keywords
         for a in soup.find_all("a"):
             text_val = a.get_text(strip=True)
             href = a.get("href", "")
-            
-            # Match logic: Does the text contain your keywords?
             if any(k in text_val.lower() for k in keyword_list) and len(text_val) > 3:
-                jobs.append({
-                    "title": text_val,
-                    "link": urljoin(url, href)
-                })
-
-        # Remove duplicates
+                jobs.append({"title": text_val, "link": urljoin(url, href)})
         unique_jobs = {j['title']: j for j in jobs}.values()
         return list(unique_jobs)[:15]
     except Exception as e:
@@ -119,7 +124,6 @@ if "logged_in" not in st.session_state:
 if not st.session_state.logged_in:
     st.title("🚀 Horizon AI - Career Monitor")
     tab1, tab2 = st.tabs(["Login", "Sign Up"])
-
     with tab1:
         with st.form("login_form"):
             email_in = st.text_input("Email")
@@ -134,7 +138,6 @@ if not st.session_state.logged_in:
                     st.rerun()
                 else:
                     st.error("Invalid Credentials")
-
     with tab2:
         with st.form("signup_form"):
             email_reg = st.text_input("Preferred Email")
@@ -152,65 +155,61 @@ else:
         st.rerun()
 
     st.title("📊 Career Monitor Dashboard")
-
     col1, col2 = st.columns([2, 1])
-
-    with col1:
-        st.subheader("🔎 Live Job Scanner")
-        u_data = st.session_state.user_data
-        curr_url = u_data.get('target_url', "") if u_data else ""
-        curr_keys = u_data.get('keywords', "") if u_data else ""
-
-        url_input = st.text_input("Enter Company Careers URL", value=curr_url)
-        
-        if st.button("Manual Scan Now"):
-            with st.spinner("Searching..."):
-                found_jobs = quick_scrape(url_input, curr_keys)
-                if found_jobs:
-                    st.markdown("### Relevant Jobs Found:")
-                    for job in found_jobs:
-                        st.markdown(f"- **{job['title']}** \n  [Open Link]({job['link']})")
-                else:
-                    st.info("No matching jobs found on this page.")
 
     with col2:
         st.subheader("👤 Your Profile")
-        with st.expander("Update Monitoring Settings", expanded=True):
-            new_url = st.text_input("Default Website to Monitor", value=curr_url)
+        with st.expander("Update Keywords", expanded=True):
+            curr_keys = st.session_state.user_data.get('keywords', "")
             new_keys = st.text_area("Keywords (comma separated)", value=curr_keys)
-            if st.button("Save Profile Settings"):
-                if update_user_settings(st.session_state.user_id, new_keys, new_url):
-                    st.session_state.user_data = get_user_by_email(st.session_state.user_email)
-                    st.success("Settings Saved!")
+            if st.button("Save Keywords"):
+                update_user_settings(st.session_state.user_id, new_keys, "")
+                st.session_state.user_data['keywords'] = new_keys
+                st.success("Keywords Saved!")
+
+        st.divider()
+        st.subheader("🔗 Monitored Sites")
+        new_site = st.text_input("Add Company Careers URL")
+        if st.button("➕ Add Site"):
+            if new_site:
+                if add_monitored_site(st.session_state.user_id, new_site):
+                    st.success("Added to 24h scan list!")
                     st.rerun()
 
-    st.divider()
+        sites_df = get_monitored_sites(st.session_state.user_id)
+        for index, row in sites_df.iterrows():
+            st.caption(f"📍 {row['url']}")
 
-    # --- THE EXCEL & MONITOR STATUS SECTION ---
+    with col1:
+        st.subheader("🔎 Live Job Scanner")
+        if not sites_df.empty:
+            all_urls = sites_df['url'].tolist()
+            selected_url = st.selectbox("Select site to scan", options=["SCAN ALL"] + all_urls)
+            
+            if st.button("Run Scan"):
+                urls_to_process = all_urls if selected_url == "SCAN ALL" else [selected_url]
+                for url in urls_to_process:
+                    st.write(f"**Results for {url}:**")
+                    found = quick_scrape(url, st.session_state.user_data.get('keywords', ""))
+                    if found:
+                        for job in found:
+                            st.markdown(f"- **{job['title']}** [Open Link]({job['link']})")
+                    else:
+                        st.info("No matches found.")
+        else:
+            st.warning("Please add a site in the profile section first.")
+
+    st.divider()
     st.subheader("📄 Daily Excel Intelligence (24h Update)")
-    
     try:
-        # Fetch only THIS user's data
         report_data = conn.query(
             "SELECT job_title, company_name, location, link, extracted_at FROM daily_excel_data WHERE user_id = :uid ORDER BY extracted_at DESC",
-            params={"uid": st.session_state.user_id},
-            ttl=0
+            params={"uid": st.session_state.user_id}, ttl=0
         )
-
         if not report_data.empty:
-            # RUNNING STATUS BUTTON
             st.button("🟢 Monitor Status: Active & Running", disabled=True)
-            
             last_run = report_data['extracted_at'].max()
-            st.success(f"✅ Excel Report Ready (Last updated: {last_run.strftime('%Y-%m-%d')})")
             
-            with st.expander("📝 View Found Jobs as List"):
-                for index, row in report_data.iterrows():
-                    st.markdown(f"**{row['job_title']}** | {row['location']}")
-                    st.caption(f"[Apply]({row['link']})")
-                    st.write("---")
-
-            # EXCEL GENERATION
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                 report_data.to_excel(writer, index=False, sheet_name='Job_Tracker')
@@ -218,17 +217,11 @@ else:
             st.download_button(
                 label="📥 Download Daily Excel Sheet",
                 data=buffer.getvalue(),
-                file_name=f"Job_Tracker_Daily_{last_run.strftime('%Y%m%d')}.xlsx",
+                file_name=f"Job_Tracker_{last_run.strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
         else:
-            # WAITING STATUS
-            st.info("🟡 Monitor Status: Waiting for next 24h background scan...")
-            
+            st.info("🟡 Monitor Status: Waiting for 24h background scan to find matches...")
     except Exception:
-        st.warning("Daily system is initializing...")
-
-    st.divider()
-    st.subheader("🤖 Active Configuration")
-    st.code(f"Site: {curr_url}\nKeys: {curr_keys}")
+        st.warning("System initializing...")
