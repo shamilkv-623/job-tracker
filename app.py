@@ -6,6 +6,7 @@ import io
 from bs4 import BeautifulSoup
 from sqlalchemy import text
 from urllib.parse import urljoin
+from datetime import datetime
 
 # ---------------- CONFIG ----------------
 st.set_page_config(page_title="Horizon AI | Career Monitor", layout="wide", page_icon="🚀")
@@ -78,7 +79,6 @@ def update_user_settings(user_id: int, keywords: str, url: str):
         st.error(f"Save Error: {e}")
         return False
 
-# --- MULTI-SITE DB HELPERS ---
 def get_monitored_sites(user_id):
     return conn.query("SELECT id, url FROM monitored_sites WHERE user_id = :uid", params={"uid": user_id}, ttl=0)
 
@@ -188,14 +188,38 @@ else:
             
             if st.button("Run Scan"):
                 urls_to_process = all_urls if selected_url == "SCAN ALL" else [selected_url]
+                found_any = False
+                
                 for url in urls_to_process:
                     st.write(f"**Results for {url}:**")
                     found = quick_scrape(url, st.session_state.user_data.get('keywords', ""))
-                    if found:
-                        for job in found:
-                            st.markdown(f"- **{job['title']}** [Open Link]({job['link']})")
+                    
+                    if found and "Error" not in found[0]['title']:
+                        found_any = True
+                        with conn.session as s:
+                            for job in found:
+                                st.markdown(f"- **{job['title']}** [Open Link]({job['link']})")
+                                
+                                # SAVING EACH MATCH TO EXCEL TABLE IMMEDIATELY
+                                s.execute(
+                                    text("""INSERT INTO daily_excel_data 
+                                         (user_id, job_title, company_name, location, link) 
+                                         VALUES (:uid, :title, :comp, :loc, :link)"""),
+                                    {
+                                        "uid": st.session_state.user_id,
+                                        "title": job['title'],
+                                        "comp": url.split("//")[-1].split(".")[0].capitalize(),
+                                        "loc": "Manual Scan",
+                                        "link": job['link']
+                                    }
+                                )
+                            s.commit()
                     else:
-                        st.info("No matches found.")
+                        st.info(f"No matches found for {url}.")
+                
+                if found_any:
+                    st.success("✅ Findings have been added to your Excel report below!")
+                    st.rerun()
         else:
             st.warning("Please add a site in the profile section first.")
 
@@ -210,6 +234,9 @@ else:
             st.button("🟢 Monitor Status: Active & Running", disabled=True)
             last_run = report_data['extracted_at'].max()
             
+            # Format dataframe for clean excel
+            report_data['extracted_at'] = report_data['extracted_at'].dt.strftime('%Y-%m-%d %H:%M')
+            
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                 report_data.to_excel(writer, index=False, sheet_name='Job_Tracker')
@@ -217,11 +244,11 @@ else:
             st.download_button(
                 label="📥 Download Daily Excel Sheet",
                 data=buffer.getvalue(),
-                file_name=f"Job_Tracker_{last_run.strftime('%Y%m%d')}.xlsx",
+                file_name=f"Job_Tracker_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
         else:
-            st.info("🟡 Monitor Status: Waiting for 24h background scan to find matches...")
+            st.info("🟡 Monitor Status: Waiting for scan to find matches...")
     except Exception:
         st.warning("System initializing...")
