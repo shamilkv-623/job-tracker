@@ -3,9 +3,9 @@ import requests
 from bs4 import BeautifulSoup
 from sqlalchemy import create_engine, text
 from datetime import datetime
+from urllib.parse import urljoin
 
 # 1. DATABASE CONNECTION
-# This uses the 'DATABASE_URL' secret you set in GitHub Actions
 DB_URL = os.getenv("DATABASE_URL")
 if not DB_URL:
     print("❌ ERROR: DATABASE_URL not found in environment variables.")
@@ -15,26 +15,28 @@ engine = create_engine(DB_URL)
 
 def run_global_scan():
     with engine.connect() as conn:
-        # 2. GET ALL USERS
-        # We fetch every user who has defined keywords to monitor
         print("--- Starting 24h Global Scan ---")
-        users = conn.execute(text("SELECT id, email, keywords FROM users")).fetchall()
+        
+        # 2. GET ALL USERS (Updated to fetch target_url)
+        users = conn.execute(text("SELECT id, email, keywords, target_url FROM users")).fetchall()
         
         if not users:
             print("⚠️ No users found in database.")
             return
 
-        for user_id, email, keywords in users:
-            if not keywords:
-                print(f"⏩ Skipping {email}: No keywords defined.")
+        for user_id, email, keywords, target_url in users:
+            if not target_url or not keywords:
+                print(f"⏩ Skipping {email}: URL or keywords missing.")
                 continue
 
-            print(f"🔎 Scanning for {email} (Keywords: {keywords})")
+            print(f"🔎 Scanning {target_url} for {email} (Keywords: {keywords})")
             
-            # 3. TARGET SOURCE
-            # For now, we use a default. You can also add a 'target_url' column 
-            # to your 'users' table to make this even more specific.
-            target_url = "https://careers.google.com/jobs/results/" 
+            # 3. CLEAN UP OLD DATA
+            # Optional: Deletes previous results for this user so the Excel stays fresh
+            conn.execute(
+                text("DELETE FROM daily_excel_data WHERE user_id = :uid"),
+                {"uid": user_id}
+            )
             
             try:
                 headers = {"User-Agent": "Mozilla/5.0"}
@@ -45,18 +47,18 @@ def run_global_scan():
                 keyword_list = [k.strip().lower() for k in keywords.split(",")]
                 matches_found = 0
 
+                # We look at all links on the target company page
                 for a in soup.find_all("a"):
                     job_title = a.get_text().strip()
                     job_link = a.get("href", "")
                     
-                    # If any keyword matches the job title
-                    if any(k in job_title.lower() for k in keyword_list):
-                        # Ensure link is absolute
-                        if job_link.startswith("/"):
-                            job_link = f"https://careers.google.com{job_link}"
+                    # If any keyword matches the job title and the title is long enough to be real
+                    if any(k in job_title.lower() for k in keyword_list) and len(job_title) > 3:
+                        
+                        # Ensure link is absolute (handles /jobs/123 -> https://company.com/jobs/123)
+                        full_link = urljoin(target_url, job_link)
 
                         # 5. SAVE TO DATABASE
-                        # Matches your 'daily_excel_data' table schema
                         conn.execute(
                             text("""
                                 INSERT INTO daily_excel_data 
@@ -66,9 +68,9 @@ def run_global_scan():
                             {
                                 "uid": user_id, 
                                 "title": job_title,
-                                "company": "Google (Example Source)", # You can make this dynamic
-                                "loc": "Remote / Various",
-                                "link": job_link,
+                                "company": "Target Company", # You could extract this from the URL domain
+                                "loc": "Check Link",
+                                "link": full_link,
                                 "now": datetime.now()
                             }
                         )
