@@ -1,0 +1,27 @@
+name: 24h-Job-Monitor
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Runs every night at midnight UTC
+  workflow_dispatch:   # This adds the "Run workflow" button you need
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 sqlalchemy psycopg2-binary pandas xlsxwriter
+
+      - name: Run Scan Script
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python cron_scan.py
