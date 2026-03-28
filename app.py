@@ -3,7 +3,6 @@ import pandas as pd
 import bcrypt
 import requests
 from bs4 import BeautifulSoup
-from sqlalchemy import text  # Added this import
 
 # ---------------- CONFIG ----------------
 st.set_page_config(page_title="Horizon AI | Career Monitor", layout="wide", page_icon="🚀")
@@ -11,30 +10,9 @@ st.set_page_config(page_title="Horizon AI | Career Monitor", layout="wide", page
 # ---------------- DB CONNECTION ----------------
 @st.cache_resource
 def get_connection():
-    try:
-        return st.connection("postgresql", type="sql")
-    except Exception as e:
-        st.error("Database connection failed. Check your secrets.toml.")
-        return None
+    return st.connection("postgresql", type="sql")
 
 conn = get_connection()
-
-# --- INITIALIZE DATABASE TABLE ---
-def init_db():
-    if conn is not None:
-        with conn.session as s:
-            # Wrapped the query in text() to solve the ArgumentError
-            s.execute(text("""
-                CREATE TABLE IF NOT EXISTS users (
-                    id SERIAL PRIMARY KEY,
-                    email TEXT UNIQUE NOT NULL,
-                    password TEXT NOT NULL,
-                    keywords TEXT
-                )
-            """))
-            s.commit()
-
-init_db()
 
 # ---------------- AUTH HELPERS ----------------
 def hash_password(password: str) -> str:
@@ -48,34 +26,48 @@ def check_password(password: str, hashed_password: str) -> bool:
 
 # ---------------- DB FUNCTIONS ----------------
 def get_user_by_email(email: str):
-    if conn is None: return None
-    # Using text() for consistency and security
-    query = text("SELECT id, email, password, keywords FROM users WHERE email = :email")
-    res = conn.query(query, params={"email": str(email)}, ttl=0)
-    return res.iloc[0] if not res.empty else None
+    query = """
+    SELECT id, email, password, keywords
+    FROM users
+    WHERE email = :email
+    """
+    try:
+        res = conn.query(query, params={"email": str(email)}, ttl=0)
+        return res.iloc[0] if not res.empty else None
+    except Exception as e:
+        st.error(f"DB Error (fetch user): {e}")
+        return None
 
 def register_user(email: str, password: str):
-    if conn is None: return False, "No DB Connection"
     hashed = hash_password(password)
     try:
         with conn.session as s:
             s.execute(
-                text("INSERT INTO users (email, password) VALUES (:email, :password)"),
+                """
+                INSERT INTO users (email, password)
+                VALUES (:email, :password)
+                """,
                 {"email": email, "password": hashed},
             )
             s.commit()
-        return True, "Success"
+        return True, None
     except Exception as e:
         return False, str(e)
 
 def update_user_keywords(user_id: int, keywords: str):
-    if conn is not None:
+    try:
         with conn.session as s:
             s.execute(
-                text("UPDATE users SET keywords = :keywords WHERE id = :id"),
+                """
+                UPDATE users
+                SET keywords = :keywords
+                WHERE id = :id
+                """,
                 {"keywords": keywords, "id": user_id},
             )
             s.commit()
+    except Exception as e:
+        st.error(f"Update Error: {e}")
 
 # ---------------- SCRAPER ----------------
 def quick_scrape(url: str):
@@ -83,13 +75,15 @@ def quick_scrape(url: str):
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, "html.parser")
+
         jobs = []
         for a in soup.find_all("a"):
             href = (a.get("href") or "").lower()
-            text_content = a.get_text(strip=True)
+            text = a.get_text(strip=True)
             if any(k in href for k in ["job", "career", "opening"]):
-                if text_content:
-                    jobs.append(text_content)
+                if text:
+                    jobs.append(text)
+
         return list(set(jobs))[:10] if jobs else ["No jobs found"]
     except Exception as e:
         return [f"Error: {str(e)}"]
@@ -108,64 +102,98 @@ def init_session():
 
 init_session()
 
-# ---------------- UI LOGIC ----------------
+# ---------------- AUTH UI ----------------
 if not st.session_state.logged_in:
     st.title("🚀 Horizon AI - Career Monitor")
     tab1, tab2 = st.tabs(["Login", "Sign Up"])
 
+    # -------- LOGIN --------
     with tab1:
         with st.form("login_form"):
-            email_input = st.text_input("Email")
-            pass_input = st.text_input("Password", type="password")
-            if st.form_submit_button("Login"):
-                user = get_user_by_email(email_input)
-                if user is not None and check_password(pass_input, user.password):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Login")
+
+            if submit:
+                user = get_user_by_email(email)
+
+                if user is None:
+                    st.error("User not found")
+                elif check_password(password, user.password):
                     st.session_state.logged_in = True
                     st.session_state.user_id = int(user.id)
                     st.session_state.user_email = user.email
                     st.session_state.user_data = user
+                    st.success("Login successful")
                     st.rerun()
                 else:
-                    st.error("Invalid credentials")
+                    st.error("Incorrect password")
 
+    # -------- SIGNUP --------
     with tab2:
         with st.form("signup_form"):
-            reg_email = st.text_input("New Email")
-            reg_pass = st.text_input("New Password", type="password")
-            if st.form_submit_button("Register"):
-                success, msg = register_user(reg_email, reg_pass)
-                if success:
-                    st.success("Account created! Please login.")
-                else:
-                    st.error(f"Error: {msg}")
+            email = st.text_input("New Email")
+            password = st.text_input("New Password", type="password")
+            submit = st.form_submit_button("Register")
 
+            if submit:
+                if not email or not password:
+                    st.warning("Please fill all fields")
+                else:
+                    success, error = register_user(email, password)
+
+                    if success:
+                        st.success("Account created! Please login.")
+                    else:
+                        if "duplicate" in error.lower():
+                            st.error("User already exists")
+                        else:
+                            st.error(f"Database Error: {error}")
+
+# ---------------- MAIN APP ----------------
 else:
-    # --- DASHBOARD ---
     st.sidebar.title("Settings")
-    st.sidebar.write(f"User: {st.session_state.user_email}")
+    st.sidebar.write(f"Logged in as: {st.session_state.user_email}")
+
     if st.sidebar.button("Logout"):
-        st.session_state.clear()
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
         st.rerun()
 
     st.title("📊 Career Monitor Dashboard")
-    
+
     col1, col2 = st.columns([2, 1])
+
+    # -------- JOB SCANNER --------
     with col1:
         st.subheader("🔎 Live Job Scanner")
-        target_url = st.text_input("Enter company careers page URL")
+        url = st.text_input("Enter company careers page URL")
+
         if st.button("Scan Jobs"):
             with st.spinner("Scanning..."):
-                results = quick_scrape(target_url)
-                for job in results:
+                jobs = quick_scrape(url)
+                for job in jobs:
                     st.write(f"✅ {job}")
 
+    # -------- PROFILE --------
     with col2:
         st.subheader("👤 Profile")
-        u_data = st.session_state.user_data
-        curr_keys = getattr(u_data, 'keywords', "") or ""
-        
-        new_keys = st.text_area("Target Roles", value=curr_keys)
-        if st.button("Save Keywords"):
-            update_user_keywords(st.session_state.user_id, new_keys)
-            st.session_state.user_data = get_user_by_email(st.session_state.user_email)
-            st.rerun()
+
+        user_data = st.session_state.user_data
+        current_keywords = user_data.keywords if user_data.keywords else ""
+
+        with st.expander("Update Keywords"):
+            new_keywords = st.text_area("Target Roles", value=current_keywords)
+
+            if st.button("Save Keywords"):
+                update_user_keywords(st.session_state.user_id, new_keywords)
+                st.success("Updated successfully")
+
+                # refresh session
+                st.session_state.user_data = get_user_by_email(st.session_state.user_email)
+                st.rerun()
+
+    st.divider()
+
+    st.subheader("🤖 Tracking Summary")
+    st.info(f"Tracking roles: {current_keywords if current_keywords else 'None'}")
