@@ -12,14 +12,12 @@ st.set_page_config(page_title="Horizon AI | Career Monitor", layout="wide", page
 # ---------------- DB CONNECTION ----------------
 @st.cache_resource
 def get_connection():
-    # Streamlit looks for [connections.postgresql] in secrets.toml
     return st.connection("postgresql", type="sql")
 
 conn = get_connection()
 
 # ---------------- DEBUGGING TOOL ----------------
 def run_connection_test():
-    """Tests the connection and displays results in the sidebar."""
     st.sidebar.subheader("System Status")
     try:
         with conn.session as s:
@@ -45,7 +43,8 @@ def check_password(password: str, hashed_password: str) -> bool:
 # ---------------- DB FUNCTIONS ----------------
 
 def get_user_by_email(email: str):
-    query = "SELECT id, email, password, keywords FROM users WHERE email = :email"
+    # Updated to fetch target_url
+    query = "SELECT id, email, password, keywords, target_url FROM users WHERE email = :email"
     try:
         res = conn.query(query, params={"email": str(email)}, ttl=0)
         if not res.empty:
@@ -68,16 +67,19 @@ def register_user(email: str, password: str):
     except Exception as e:
         return False, str(e)
 
-def update_user_keywords(user_id: int, keywords: str):
+# Updated to save both keywords and target_url
+def update_user_settings(user_id: int, keywords: str, url: str):
     try:
         with conn.session as s:
             s.execute(
-                text("UPDATE users SET keywords = :keywords WHERE id = :id"),
-                {"keywords": keywords, "id": user_id},
+                text("UPDATE users SET keywords = :keywords, target_url = :url WHERE id = :id"),
+                {"keywords": keywords, "url": url, "id": user_id},
             )
             s.commit()
+        return True
     except Exception as e:
         st.error(f"Profile Update Error: {e}")
+        return False
 
 # ---------------- SCRAPER (MANUAL) ----------------
 def quick_scrape(url: str):
@@ -162,14 +164,18 @@ else:
         st.subheader("👤 Your Profile")
         u_data = st.session_state.user_data
         curr_keys = u_data.get('keywords', "") if u_data else ""
+        curr_url = u_data.get('target_url', "") if u_data else ""
 
-        with st.expander("Update Monitoring Keywords"):
+        with st.expander("Update Monitoring Settings"):
+            # Added target_url input
+            new_url = st.text_input("Company URL to Monitor", value=curr_url, placeholder="https://careers.google.com/...")
             new_keys = st.text_area("Keywords (comma separated)", value=curr_keys)
+            
             if st.button("Save Changes"):
-                update_user_keywords(st.session_state.user_id, new_keys)
-                st.session_state.user_data = get_user_by_email(st.session_state.user_email)
-                st.success("Keywords updated!")
-                st.rerun()
+                if update_user_settings(st.session_state.user_id, new_keys, new_url):
+                    st.session_state.user_data = get_user_by_email(st.session_state.user_email)
+                    st.success("Settings updated! The 24h scan will now use these.")
+                    st.rerun()
 
     st.divider()
 
@@ -177,7 +183,7 @@ else:
     st.subheader("📄 Daily Excel Intelligence (24h Update)")
     
     try:
-        # Fetch data specifically for THIS user from the new table
+        # Fetch data for this specific user
         report_data = conn.query(
             """
             SELECT job_title, company_name, location, link, extracted_at 
@@ -190,10 +196,12 @@ else:
         )
 
         if not report_data.empty:
-            last_run = report_data['extracted_at'].max()
-            st.success(f"✅ Your 24h update is ready! (Last scan: {last_run.strftime('%Y-%m-%d %H:%M')})")
+            # Active status button
+            st.button("🟢 Monitor Status: Active & Running", disabled=True)
             
-            # Data Preview for User Confidence
+            last_run = report_data['extracted_at'].max()
+            st.success(f"✅ Your latest Excel report is ready. (Last scan: {last_run.strftime('%Y-%m-%d %H:%M')})")
+            
             with st.expander("🔍 Preview Matches Found"):
                 st.dataframe(report_data, use_container_width=True)
 
@@ -202,20 +210,22 @@ else:
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                 report_data.to_excel(writer, index=False, sheet_name='Job_Tracker_Daily')
             
-            # Download Button
             st.download_button(
                 label="📥 Download My Personal Job Report (Excel)",
                 data=buffer.getvalue(),
-                file_name=f"My_Job_Report_{last_run.strftime('%Y%m%d')}.xlsx",
+                file_name=f"Job_Report_{last_run.strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
         else:
-            st.info("🕒 Your personalized background monitor is active. Your report will appear here once the next 24h scan finds matches for your keywords.")
+            # Waiting status button
+            st.info("🟡 Monitor Status: Waiting for next 24h cycle...")
+            st.write("The background monitor will scan your saved **Company URL** tonight. Ensure it is set in your profile.")
             
     except Exception as e:
         st.warning("Daily Intelligence System is initializing. Please ensure your background worker has run once.")
 
     st.divider()
     st.subheader("🤖 Current Settings")
+    st.write(f"Targeting Website: `{curr_url if curr_url else 'Not Set'}`")
     st.write(f"Active monitoring keywords: `{curr_keys if curr_keys else 'None Set'}`")
