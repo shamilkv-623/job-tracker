@@ -3,5 +3,6 @@ pandas
 bcrypt
 requests
 beautifulsoup4
-psycopg2-binary
 sqlalchemy
+psycopg2-binary
+xlsxwriter
