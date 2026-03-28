@@ -1,27 +1,23 @@
-name: 24h-Job-Monitor
+name: Global 24h Job Scan
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Runs every night at midnight UTC
-  workflow_dispatch:   # This adds the "Run workflow" button you need
+    - cron: '0 0 * * *'  # Runs every day at midnight UTC
+  workflow_dispatch:      # Allows you to click "Run" manually to test
 
 jobs:
-  build:
+  run-scanner:
     runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
+      - uses: actions/checkout@v3
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-
       - name: Install dependencies
-        run: |
-          pip install requests beautifulsoup4 sqlalchemy psycopg2-binary pandas xlsxwriter
-
-      - name: Run Scan Script
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: pip install -r requirements.txt
+      - name: Run Global Scan
         run: python cron_scan.py
