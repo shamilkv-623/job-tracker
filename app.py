@@ -3,133 +3,179 @@ import pandas as pd
 import bcrypt
 import requests
 from bs4 import BeautifulSoup
-from sqlalchemy import text
 
-# --- CONFIGURATION ---
+# ---------------- CONFIG ----------------
 st.set_page_config(page_title="Horizon AI | Career Monitor", layout="wide", page_icon="🚀")
 
-# --- DATABASE CONNECTION ---
-try:
-    conn = st.connection("postgresql", type="sql")
-except Exception as e:
-    st.error("⚠️ Database Connection Error. Check your Streamlit Secrets.")
-    st.stop()
+# ---------------- DB CONNECTION ----------------
+@st.cache_resource
+def get_connection():
+    return st.connection("postgresql", type="sql")
 
-# --- UTILITY FUNCTIONS ---
-def hash_password(password):
+conn = get_connection()
+
+# ---------------- AUTH HELPERS ----------------
+def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
-def check_password(password, hashed_password):
+
+def check_password(password: str, hashed_password: str) -> bool:
     try:
         return bcrypt.checkpw(password.encode(), hashed_password.encode())
     except Exception:
         return False
 
-def get_user_by_email(email):
-    query = text("SELECT id, email, password, keywords FROM users WHERE email = :email")
-    res = conn.query(query, params={"email": email})
+# ---------------- DB FUNCTIONS ----------------
+def get_user_by_email(email: str):
+    query = """
+    SELECT id, email, password, keywords
+    FROM users
+    WHERE email = :email
+    """
+    res = conn.query(query, params={"email": str(email)}, ttl=0)
     return res.iloc[0] if not res.empty else None
 
-def register_user(email, password):
+
+def register_user(email: str, password: str):
     hashed = hash_password(password)
     with conn.session as s:
         s.execute(
-            text("INSERT INTO users (email, password) VALUES (:email, :password)"),
-            {"email": email, "password": hashed}
+            """
+            INSERT INTO users (email, password)
+            VALUES (:email, :password)
+            """,
+            {"email": email, "password": hashed},
         )
         s.commit()
 
-def update_user_keywords(user_id, keywords):
+
+def update_user_keywords(user_id: int, keywords: str):
     with conn.session as s:
         s.execute(
-            text("UPDATE users SET keywords = :keywords WHERE id = :id"),
-            {"keywords": keywords, "id": user_id}
+            """
+            UPDATE users
+            SET keywords = :keywords
+            WHERE id = :id
+            """,
+            {"keywords": keywords, "id": user_id},
         )
         s.commit()
 
-# --- SCRAPER LOGIC ---
-def quick_scrape(url):
+# ---------------- SCRAPER ----------------
+def quick_scrape(url: str):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        jobs = [a.get_text(strip=True) for a in soup.find_all('a') if any(k in a.get('href', '').lower() for k in ['job', 'career'])]
-        return list(set(jobs))[:5]
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        jobs = []
+        for a in soup.find_all("a"):
+            href = (a.get("href") or "").lower()
+            text = a.get_text(strip=True)
+            if any(k in href for k in ["job", "career", "opening"]):
+                if text:
+                    jobs.append(text)
+
+        return list(set(jobs))[:10] if jobs else ["No jobs found"]
     except Exception as e:
         return [f"Error: {str(e)}"]
 
-# --- SESSION STATE ---
-if 'logged_in' not in st.session_state:
-    st.session_state.logged_in = False
-if 'user_id' not in st.session_state:
-    st.session_state.user_id = None
-if 'user_email' not in st.session_state:
-    st.session_state.user_email = None
+# ---------------- SESSION ----------------
+def init_session():
+    defaults = {
+        "logged_in": False,
+        "user_id": None,
+        "user_email": None,
+        "user_data": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
-# --- UI: AUTHENTICATION ---
+
+init_session()
+
+# ---------------- AUTH UI ----------------
 if not st.session_state.logged_in:
-    st.title("Welcome to Horizon AI")
-    auth_tab1, auth_tab2 = st.tabs(["Login", "Sign Up"])
+    st.title("🚀 Horizon AI - Career Monitor")
+    tab1, tab2 = st.tabs(["Login", "Sign Up"])
 
-    with auth_tab1:
-        with st.form("login"):
-            email_in = st.text_input("Email")
-            pwd_in = st.text_input("Password", type="password")
-            if st.form_submit_button("Login"):
-                user = get_user_by_email(email_in)
-                if user is not None and check_password(pwd_in, user.password):
+    with tab1:
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Login")
+
+            if submit:
+                user = get_user_by_email(email)
+
+                if user is not None and check_password(password, user.password):
                     st.session_state.logged_in = True
                     st.session_state.user_id = int(user.id)
                     st.session_state.user_email = user.email
+                    st.session_state.user_data = user
+                    st.success("Login successful")
                     st.rerun()
                 else:
                     st.error("Invalid credentials")
 
-    with auth_tab2:
-        with st.form("signup"):
-            new_email = st.text_input("New Email")
-            new_pwd = st.text_input("New Password", type="password")
-            if st.form_submit_button("Register"):
+    with tab2:
+        with st.form("signup_form"):
+            email = st.text_input("New Email")
+            password = st.text_input("New Password", type="password")
+            submit = st.form_submit_button("Register")
+
+            if submit:
                 try:
-                    register_user(new_email, new_pwd)
+                    register_user(email, password)
                     st.success("Account created! Please login.")
                 except Exception:
-                    st.error("Registration failed. Email might already exist.")
+                    st.error("User already exists or DB error")
 
-# --- UI: MAIN DASHBOARD ---
+# ---------------- MAIN APP ----------------
 else:
     st.sidebar.title("Settings")
-    st.sidebar.write(f"User: {st.session_state.user_email}")
+    st.sidebar.write(f"Logged in as: {st.session_state.user_email}")
+
     if st.sidebar.button("Logout"):
-        st.session_state.logged_in = False
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
         st.rerun()
 
-    st.title("🚀 Career Monitor Dashboard")
-    
+    st.title("📊 Career Monitor Dashboard")
+
     col1, col2 = st.columns([2, 1])
 
+    # -------- JOB SCANNER --------
     with col1:
-        st.subheader("Live Job Scan")
-        target_url = st.text_input("Enter Company Career URL")
-        if st.button("START SCAN NOW", type="primary"):
+        st.subheader("🔎 Live Job Scanner")
+        url = st.text_input("Enter company careers page URL")
+
+        if st.button("Scan Jobs"):
             with st.spinner("Scanning..."):
-                results = quick_scrape(target_url)
-                for job in results:
+                jobs = quick_scrape(url)
+                for job in jobs:
                     st.write(f"✅ {job}")
 
+    # -------- PROFILE --------
     with col2:
-        st.subheader("Your Profile")
-        # Fetch current keywords from DB
-        user_data = get_user_by_email(st.session_state.user_email)
+        st.subheader("👤 Profile")
+
+        user_data = st.session_state.user_data
         current_keywords = user_data.keywords if user_data.keywords else ""
-        
+
         with st.expander("Update Keywords"):
-            new_keywords = st.text_area("Target Roles", value=current_keywords, height=100)
+            new_keywords = st.text_area("Target Roles", value=current_keywords)
+
             if st.button("Save Keywords"):
                 update_user_keywords(st.session_state.user_id, new_keywords)
-                st.success("Keywords saved to your profile!")
+                st.success("Updated successfully")
+
+                # refresh session
+                st.session_state.user_data = get_user_by_email(st.session_state.user_email)
                 st.rerun()
 
     st.divider()
-    st.subheader("Automated Tracking")
-    st.info(f"Bot is tracking roles: **{current_keywords if current_keywords else 'None set'}**")
+
+    st.subheader("🤖 Tracking Summary")
+    st.info(f"Tracking roles: {current_keywords if current_keywords else 'None'}")
