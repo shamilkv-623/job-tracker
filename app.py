@@ -5,6 +5,7 @@ import requests
 import io
 from bs4 import BeautifulSoup
 from sqlalchemy import text
+from urllib.parse import urljoin
 
 # ---------------- CONFIG ----------------
 st.set_page_config(page_title="Horizon AI | Career Monitor", layout="wide", page_icon="🚀")
@@ -12,11 +13,12 @@ st.set_page_config(page_title="Horizon AI | Career Monitor", layout="wide", page
 # ---------------- DB CONNECTION ----------------
 @st.cache_resource
 def get_connection():
+    # Uses [connections.postgresql] from your secrets.toml
     return st.connection("postgresql", type="sql")
 
 conn = get_connection()
 
-# ---------------- DEBUGGING TOOL ----------------
+# ---------------- SYSTEM STATUS ----------------
 def run_connection_test():
     st.sidebar.subheader("System Status")
     try:
@@ -25,8 +27,6 @@ def run_connection_test():
         st.sidebar.success("✅ Database: Connected")
     except Exception as e:
         st.sidebar.error("❌ Database: Connection Failed")
-        with st.sidebar.expander("View Error Details"):
-            st.code(str(e))
 
 run_connection_test()
 
@@ -43,7 +43,6 @@ def check_password(password: str, hashed_password: str) -> bool:
 # ---------------- DB FUNCTIONS ----------------
 
 def get_user_by_email(email: str):
-    # Updated to fetch target_url
     query = "SELECT id, email, password, keywords, target_url FROM users WHERE email = :email"
     try:
         res = conn.query(query, params={"email": str(email)}, ttl=0)
@@ -51,7 +50,7 @@ def get_user_by_email(email: str):
             return res.iloc[0].to_dict()
         return None
     except Exception as e:
-        st.error(f"Authentication Error: {e}")
+        st.error(f"Auth Error: {e}")
         return None
 
 def register_user(email: str, password: str):
@@ -67,7 +66,6 @@ def register_user(email: str, password: str):
     except Exception as e:
         return False, str(e)
 
-# Updated to save both keywords and target_url
 def update_user_settings(user_id: int, keywords: str, url: str):
     try:
         with conn.session as s:
@@ -78,27 +76,37 @@ def update_user_settings(user_id: int, keywords: str, url: str):
             s.commit()
         return True
     except Exception as e:
-        st.error(f"Profile Update Error: {e}")
+        st.error(f"Save Error: {e}")
         return False
 
-# ---------------- SCRAPER (MANUAL) ----------------
-def quick_scrape(url: str):
+# ---------------- SCRAPER (LIST-BASED IDEA) ----------------
+def quick_scrape(url: str, keywords_str: str):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, "html.parser")
-
+        
+        # Clean keywords from user profile
+        keyword_list = [k.strip().lower() for k in keywords_str.split(",")] if keywords_str else []
         jobs = []
-        for a in soup.find_all("a"):
-            href = (a.get("href") or "").lower()
-            text_val = a.get_text(strip=True)
-            if any(k in href for k in ["job", "career", "opening", "vacancy", "position"]):
-                if text_val and len(text_val) > 2:
-                    jobs.append(text_val)
 
-        return list(set(jobs))[:15] if jobs else ["No active openings detected."]
+        # Scrape links that look like job titles or contain keywords
+        for a in soup.find_all("a"):
+            text_val = a.get_text(strip=True)
+            href = a.get("href", "")
+            
+            # Match logic: Does the text contain your keywords?
+            if any(k in text_val.lower() for k in keyword_list) and len(text_val) > 3:
+                jobs.append({
+                    "title": text_val,
+                    "link": urljoin(url, href)
+                })
+
+        # Remove duplicates
+        unique_jobs = {j['title']: j for j in jobs}.values()
+        return list(unique_jobs)[:15]
     except Exception as e:
-        return [f"Scraper Error: {str(e)}"]
+        return [{"title": f"Error: {str(e)}", "link": "#"}]
 
 # ---------------- SESSION MANAGEMENT ----------------
 if "logged_in" not in st.session_state:
@@ -116,30 +124,25 @@ if not st.session_state.logged_in:
         with st.form("login_form"):
             email_in = st.text_input("Email")
             pass_in = st.text_input("Password", type="password")
-            submit_log = st.form_submit_button("Access Dashboard")
-
-            if submit_log:
+            if st.form_submit_button("Access Dashboard"):
                 user = get_user_by_email(email_in)
-                if user is None:
-                    st.error("User not found.")
-                elif check_password(pass_in, user['password']):
+                if user and check_password(pass_in, user['password']):
                     st.session_state.logged_in = True
                     st.session_state.user_id = int(user['id'])
                     st.session_state.user_email = user['email']
                     st.session_state.user_data = user
                     st.rerun()
                 else:
-                    st.error("Invalid password.")
+                    st.error("Invalid Credentials")
 
     with tab2:
         with st.form("signup_form"):
             email_reg = st.text_input("Preferred Email")
             pass_reg = st.text_input("Create Password", type="password")
-            submit_reg = st.form_submit_button("Create Account")
-            if submit_reg:
+            if st.form_submit_button("Create Account"):
                 success, error = register_user(email_reg, pass_reg)
                 if success: st.success("Success! Please Login.")
-                else: st.error(f"Error: {error}")
+                else: st.error(error)
 
 # ---------------- MAIN DASHBOARD ----------------
 else:
@@ -154,78 +157,78 @@ else:
 
     with col1:
         st.subheader("🔎 Live Job Scanner")
-        url_input = st.text_input("Enter Company Careers URL")
-        if st.button("Manual Scan"):
-            with st.spinner("Fetching..."):
-                jobs = quick_scrape(url_input)
-                for job in jobs: st.info(f"📍 {job}")
+        u_data = st.session_state.user_data
+        curr_url = u_data.get('target_url', "") if u_data else ""
+        curr_keys = u_data.get('keywords', "") if u_data else ""
+
+        url_input = st.text_input("Enter Company Careers URL", value=curr_url)
+        
+        if st.button("Manual Scan Now"):
+            with st.spinner("Searching..."):
+                found_jobs = quick_scrape(url_input, curr_keys)
+                if found_jobs:
+                    st.markdown("### Relevant Jobs Found:")
+                    for job in found_jobs:
+                        st.markdown(f"- **{job['title']}** \n  [Open Link]({job['link']})")
+                else:
+                    st.info("No matching jobs found on this page.")
 
     with col2:
         st.subheader("👤 Your Profile")
-        u_data = st.session_state.user_data
-        curr_keys = u_data.get('keywords', "") if u_data else ""
-        curr_url = u_data.get('target_url', "") if u_data else ""
-
-        with st.expander("Update Monitoring Settings"):
-            # Added target_url input
-            new_url = st.text_input("Company URL to Monitor", value=curr_url, placeholder="https://careers.google.com/...")
+        with st.expander("Update Monitoring Settings", expanded=True):
+            new_url = st.text_input("Default Website to Monitor", value=curr_url)
             new_keys = st.text_area("Keywords (comma separated)", value=curr_keys)
-            
-            if st.button("Save Changes"):
+            if st.button("Save Profile Settings"):
                 if update_user_settings(st.session_state.user_id, new_keys, new_url):
                     st.session_state.user_data = get_user_by_email(st.session_state.user_email)
-                    st.success("Settings updated! The 24h scan will now use these.")
+                    st.success("Settings Saved!")
                     st.rerun()
 
     st.divider()
 
-    # --- PERSONALIZED 24H AUTOMATED EXCEL SECTION ---
+    # --- THE EXCEL & MONITOR STATUS SECTION ---
     st.subheader("📄 Daily Excel Intelligence (24h Update)")
     
     try:
-        # Fetch data for this specific user
+        # Fetch only THIS user's data
         report_data = conn.query(
-            """
-            SELECT job_title, company_name, location, link, extracted_at 
-            FROM daily_excel_data 
-            WHERE user_id = :uid 
-            ORDER BY extracted_at DESC
-            """,
+            "SELECT job_title, company_name, location, link, extracted_at FROM daily_excel_data WHERE user_id = :uid ORDER BY extracted_at DESC",
             params={"uid": st.session_state.user_id},
             ttl=0
         )
 
         if not report_data.empty:
-            # Active status button
+            # RUNNING STATUS BUTTON
             st.button("🟢 Monitor Status: Active & Running", disabled=True)
             
             last_run = report_data['extracted_at'].max()
-            st.success(f"✅ Your latest Excel report is ready. (Last scan: {last_run.strftime('%Y-%m-%d %H:%M')})")
+            st.success(f"✅ Excel Report Ready (Last updated: {last_run.strftime('%Y-%m-%d')})")
             
-            with st.expander("🔍 Preview Matches Found"):
-                st.dataframe(report_data, use_container_width=True)
+            with st.expander("📝 View Found Jobs as List"):
+                for index, row in report_data.iterrows():
+                    st.markdown(f"**{row['job_title']}** | {row['location']}")
+                    st.caption(f"[Apply]({row['link']})")
+                    st.write("---")
 
-            # Excel Generation
+            # EXCEL GENERATION
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                report_data.to_excel(writer, index=False, sheet_name='Job_Tracker_Daily')
+                report_data.to_excel(writer, index=False, sheet_name='Job_Tracker')
             
             st.download_button(
-                label="📥 Download My Personal Job Report (Excel)",
+                label="📥 Download Daily Excel Sheet",
                 data=buffer.getvalue(),
-                file_name=f"Job_Report_{last_run.strftime('%Y%m%d')}.xlsx",
+                file_name=f"Job_Tracker_Daily_{last_run.strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
         else:
-            # Waiting status button
-            st.info("🟡 Monitor Status: Waiting for next 24h cycle...")
-            st.write("The background monitor will scan your saved **Company URL** tonight. Ensure it is set in your profile.")
+            # WAITING STATUS
+            st.info("🟡 Monitor Status: Waiting for next 24h background scan...")
             
-    except Exception as e:
-        st.warning("Daily Intelligence System is initializing. Please ensure your background worker has run once.")
+    except Exception:
+        st.warning("Daily system is initializing...")
 
     st.divider()
-    st.subheader("🤖 Current Settings")
-    st.write(f"Targeting Website: `{curr_url if curr_url else 'Not Set'}`")
-    st.write(f"Active monitoring keywords: `{curr_keys if curr_keys else 'None Set'}`")
+    st.subheader("🤖 Active Configuration")
+    st.code(f"Site: {curr_url}\nKeys: {curr_keys}")
