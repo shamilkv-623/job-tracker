@@ -6,3 +6,4 @@ beautifulsoup4
 sqlalchemy
 psycopg2-binary
 xlsxwriter
+PyPDF2
