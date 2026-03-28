@@ -29,8 +29,6 @@ def run_connection_test():
         st.sidebar.error("❌ Database: Connection Failed")
         with st.sidebar.expander("View Error Details"):
             st.code(str(e))
-        if "Tenant or user not found" in str(e):
-            st.sidebar.warning("CRITICAL: Check your Supabase project ID in secrets.toml")
 
 run_connection_test()
 
@@ -81,7 +79,7 @@ def update_user_keywords(user_id: int, keywords: str):
     except Exception as e:
         st.error(f"Profile Update Error: {e}")
 
-# ---------------- SCRAPER ----------------
+# ---------------- SCRAPER (MANUAL) ----------------
 def quick_scrape(url: str):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -166,7 +164,7 @@ else:
         curr_keys = u_data.get('keywords', "") if u_data else ""
 
         with st.expander("Update Monitoring Keywords"):
-            new_keys = st.text_area("Example: Python, Quant Research", value=curr_keys)
+            new_keys = st.text_area("Keywords (comma separated)", value=curr_keys)
             if st.button("Save Changes"):
                 update_user_keywords(st.session_state.user_id, new_keys)
                 st.session_state.user_data = get_user_by_email(st.session_state.user_email)
@@ -175,40 +173,49 @@ else:
 
     st.divider()
 
-    # --- NEW: CLIENT 24H AUTOMATED REPORT SECTION ---
+    # --- PERSONALIZED 24H AUTOMATED EXCEL SECTION ---
     st.subheader("📄 Daily Excel Intelligence (24h Update)")
     
     try:
-        # We query the results table populated by your GitHub 'cron_scan.py'
+        # Fetch data specifically for THIS user from the new table
         report_data = conn.query(
-            "SELECT job_title, found_at FROM scraped_jobs WHERE user_id = :uid ORDER BY found_at DESC",
+            """
+            SELECT job_title, company_name, location, link, extracted_at 
+            FROM daily_excel_data 
+            WHERE user_id = :uid 
+            ORDER BY extracted_at DESC
+            """,
             params={"uid": st.session_state.user_id},
             ttl=0
         )
 
         if not report_data.empty:
-            last_run = report_data['found_at'].max()
-            st.success(f"✅ Your automated report is ready. (Last 24h scan: {last_run.strftime('%Y-%m-%d %H:%M')})")
+            last_run = report_data['extracted_at'].max()
+            st.success(f"✅ Your 24h update is ready! (Last scan: {last_run.strftime('%Y-%m-%d %H:%M')})")
             
-            # Prepare Excel Buffer
+            # Data Preview for User Confidence
+            with st.expander("🔍 Preview Matches Found"):
+                st.dataframe(report_data, use_container_width=True)
+
+            # Excel Generation
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                 report_data.to_excel(writer, index=False, sheet_name='Job_Tracker_Daily')
             
             # Download Button
             st.download_button(
-                label="📥 Download Updated Excel File",
+                label="📥 Download My Personal Job Report (Excel)",
                 data=buffer.getvalue(),
-                file_name=f"Daily_Job_Report_{last_run.strftime('%Y%m%d')}.xlsx",
+                file_name=f"My_Job_Report_{last_run.strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
         else:
-            st.info("🕒 Your first automated update is being processed. The background monitor runs every 24 hours.")
+            st.info("🕒 Your personalized background monitor is active. Your report will appear here once the next 24h scan finds matches for your keywords.")
             
     except Exception as e:
-        st.warning("Automated report table is being initialized. Please ensure your background worker is active.")
+        st.warning("Daily Intelligence System is initializing. Please ensure your background worker has run once.")
 
     st.divider()
     st.subheader("🤖 Current Settings")
-    st.write(f"Monitoring for keywords: `{curr_keys if curr_keys else 'General Openings'}`")
+    st.write(f"Active monitoring keywords: `{curr_keys if curr_keys else 'None Set'}`")
