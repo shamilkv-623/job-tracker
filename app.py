@@ -3,7 +3,7 @@ import pandas as pd
 import bcrypt
 import requests
 from bs4 import BeautifulSoup
-from sqlalchemy import text  # 1. IMPORT ADDED HERE
+from sqlalchemy import text
 
 # ---------------- CONFIG ----------------
 st.set_page_config(page_title="Horizon AI | Career Monitor", layout="wide", page_icon="🚀")
@@ -26,16 +26,16 @@ def check_password(password: str, hashed_password: str) -> bool:
         return False
 
 # ---------------- DB FUNCTIONS ----------------
+
 def get_user_by_email(email: str):
-    # 2. WRAPPED IN text()
-    query = text("""
+    # Pass the query as a RAW STRING to avoid Streamlit Hashing errors
+    query = """
     SELECT id, email, password, keywords 
     FROM users 
     WHERE email = :email
-    """)
+    """
     try:
-        # Note: conn.query() handles the string-to-text conversion internally 
-        # but for .execute() and consistency, we use text()
+        # conn.query handles string-to-text conversion internally
         res = conn.query(query, params={"email": str(email)}, ttl=0)
         return res.iloc[0] if not res.empty else None
     except Exception as e:
@@ -46,12 +46,9 @@ def register_user(email: str, password: str):
     hashed = hash_password(password)
     try:
         with conn.session as s:
-            # 3. WRAPPED IN text()
+            # text() is used here because .execute() is NOT cached by Streamlit
             s.execute(
-                text("""
-                INSERT INTO users (email, password) 
-                VALUES (:email, :password)
-                """),
+                text("INSERT INTO users (email, password) VALUES (:email, :password)"),
                 {"email": email, "password": hashed},
             )
             s.commit()
@@ -62,13 +59,8 @@ def register_user(email: str, password: str):
 def update_user_keywords(user_id: int, keywords: str):
     try:
         with conn.session as s:
-            # 4. WRAPPED IN text()
             s.execute(
-                text("""
-                UPDATE users 
-                SET keywords = :keywords 
-                WHERE id = :id
-                """),
+                text("UPDATE users SET keywords = :keywords WHERE id = :id"),
                 {"keywords": keywords, "id": user_id},
             )
             s.commit()
@@ -113,7 +105,6 @@ if not st.session_state.logged_in:
     st.title("🚀 Horizon AI - Career Monitor")
     tab1, tab2 = st.tabs(["Login", "Sign Up"])
 
-    # -------- LOGIN --------
     with tab1:
         with st.form("login_form"):
             email_in = st.text_input("Email")
@@ -134,7 +125,6 @@ if not st.session_state.logged_in:
                 else:
                     st.error("Incorrect password")
 
-    # -------- SIGNUP --------
     with tab2:
         with st.form("signup_form"):
             email_reg = st.text_input("New Email")
@@ -168,11 +158,9 @@ else:
 
     col1, col2 = st.columns([2, 1])
 
-    # -------- JOB SCANNER --------
     with col1:
         st.subheader("🔎 Live Job Scanner")
         url_input = st.text_input("Enter company careers page URL")
-
         if st.button("Scan Jobs"):
             if url_input:
                 with st.spinner("Scanning..."):
@@ -182,16 +170,21 @@ else:
             else:
                 st.warning("Please enter a URL")
 
-    # -------- PROFILE --------
     with col2:
         st.subheader("👤 Profile")
         u_data = st.session_state.user_data
-        curr_keys = u_data.keywords if (hasattr(u_data, 'keywords') and u_data.keywords) else ""
+        
+        # Safe access to keywords
+        if u_data is not None and hasattr(u_data, 'keywords'):
+            curr_keys = u_data.keywords if u_data.keywords else ""
+        else:
+            curr_keys = ""
 
         with st.expander("Update Keywords"):
             new_keys = st.text_area("Target Roles", value=curr_keys)
             if st.button("Save Keywords"):
                 update_user_keywords(st.session_state.user_id, new_keys)
+                # Refresh session data from DB
                 st.session_state.user_data = get_user_by_email(st.session_state.user_email)
                 st.success("Updated successfully")
                 st.rerun()
